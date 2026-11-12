@@ -1,0 +1,43 @@
+# Builds WinOverview.exe on GitHub's servers.
+# - Push a tag like v1.0.0  -> creates a GitHub Release with WinOverview.exe attached
+# - Or run it by hand from the Actions tab -> the .exe is under the run's "Artifacts"
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Build single-file exe
+        shell: pwsh
+        run: ./publish.ps1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WinOverview
+          path: |
+            dist/WinOverview.exe
+            dist/uninstall.bat
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: WinOverview ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            dist/WinOverview.exe
+            dist/uninstall.bat

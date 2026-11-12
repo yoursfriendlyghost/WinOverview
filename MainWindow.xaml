@@ -1,0 +1,69 @@
+<Window x:Class="WinOverview.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="WinOverview"
+        WindowStyle="None"
+        AllowsTransparency="True"
+        ResizeMode="NoResize"
+        Topmost="True"
+        ShowInTaskbar="False"
+        ShowActivated="True"
+        Background="Transparent"
+        FontFamily="Segoe UI Variable Display, Segoe UI"
+        PreviewKeyDown="OnKeyDown"
+        PreviewTextInput="OnTextInput"
+        SizeChanged="OnSizeChanged"
+        Deactivated="OnDeactivated">
+    <Grid x:Name="Root" ClipToBounds="True" MouseLeftButtonDown="OnBackdropClick">
+
+        <!-- Background: your wallpaper, blurred and dimmed (fades in with the panel) -->
+        <Grid x:Name="Backdrop" IsHitTestVisible="False">
+            <Image x:Name="Wallpaper" Stretch="UniformToFill"
+                   HorizontalAlignment="Center" VerticalAlignment="Center"
+                   RenderOptions.BitmapScalingMode="HighQuality"/>
+            <Rectangle x:Name="Dim" Fill="#66000000"/>
+        </Grid>
+
+        <!-- The overview panel -->
+        <Border x:Name="Card"
+                HorizontalAlignment="Center"
+                VerticalAlignment="Top"
+                Margin="0,100,0,0"
+                Padding="10"
+                CornerRadius="18"
+                Background="#E6181820"
+                BorderBrush="#22FFFFFF"
+                BorderThickness="1"
+                RenderTransformOrigin="0.5,0">
+            <Border.Effect>
+                <DropShadowEffect BlurRadius="40" ShadowDepth="10" Opacity="0.45" Color="Black"/>
+            </Border.Effect>
+
+            <StackPanel>
+                <!-- Type to search: appears as soon as you type -->
+                <Border x:Name="SearchBar" Visibility="Collapsed" HorizontalAlignment="Center" MinWidth="280"
+                        Margin="5,2,5,8" Padding="12,7" CornerRadius="10" Background="#FF2A2A36">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="&#xE721;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="13"
+                                   Foreground="#99FFFFFF" VerticalAlignment="Center" Margin="0,0,10,0"/>
+                        <TextBlock x:Name="SearchText" Foreground="White" FontSize="14" VerticalAlignment="Center"/>
+                        <TextBlock x:Name="SearchCount" Foreground="#66FFFFFF" FontSize="12"
+                                   VerticalAlignment="Center" Margin="12,0,0,0"/>
+                    </StackPanel>
+                </Border>
+                <!-- Rows of desktop tiles (tiles can differ in size, so rows are built in code) -->
+                <StackPanel x:Name="TileGrid" HorizontalAlignment="Center"/>
+                <!-- Pomodoro + music widgets, same size as the desktop tiles -->
+                <StackPanel x:Name="WidgetRow" Orientation="Horizontal" HorizontalAlignment="Center"/>
+                <TextBlock x:Name="KeyHint" HorizontalAlignment="Center" Margin="0,6,0,0" FontSize="11" Foreground="#55FFFFFF"
+                           Text="Arrows: select  •  Enter: open  •  Type: search  •  Ctrl+1–9: move to desktop  •  Del: close"/>
+            </StackPanel>
+        </Border>
+
+        <!-- Snap-layout picker appears here when an app is dropped outside the panel -->
+        <Canvas x:Name="FlyoutLayer"/>
+
+        <!-- The icon you're dragging is drawn here, above everything -->
+        <Canvas x:Name="DragLayer" IsHitTestVisible="False"/>
+    </Grid>
+</Window>

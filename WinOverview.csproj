@@ -1,0 +1,59 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <!-- The Windows 10 SDK version gives access to the media controls used by the music widget -->
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <!-- Only for the tray icon (NotifyIcon) -->
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>app.ico</ApplicationIcon>
+    <RootNamespace>WinOverview</RootNamespace>
+    <!-- VirtualDesktopAccessor.dll is 64-bit only -->
+    <PlatformTarget>x64</PlatformTarget>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>false</SelfContained>
+
+    <Product>WinOverview</Product>
+    <Description>Virtual desktop overview for Windows</Description>
+    <Version>1.0.0</Version>
+    <!-- WinForms (tray icon only) suggests its own DPI setting; the manifest's is right for WPF -->
+    <!-- WPF0001: the Windows 11 (Fluent) look used by the Settings window is marked "preview" -->
+    <NoWarn>$(NoWarn);WFO0003;WPF0001</NoWarn>
+    <!-- Lighter garbage collector settings for a small background app -->
+    <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- WinForms is only used for the tray icon; keep its names (Image, Color, Application…)
+         out of the way of WPF's -->
+    <Using Remove="System.Windows.Forms" />
+    <Using Remove="System.Drawing" />
+  </ItemGroup>
+
+  <!-- One-file release: the app, its libraries and the DLL below are packed into WinOverview.exe.
+       .NET itself is NOT included (keeps the file small): it uses the .NET 10 Desktop Runtime
+       installed on the PC. If it's missing, Windows shows a message with a download link. -->
+  <PropertyGroup Condition="'$(PublishSingleFile)' == 'true'">
+    <SelfContained>false</SelfContained>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <!-- Also runs on a newer .NET (11, 12…) if 10 isn't installed -->
+    <RollForward>Major</RollForward>
+    <DebugType>none</DebugType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Embedded inside the .exe; unpacked on first run (see Core/Desktops.cs) -->
+    <EmbeddedResource Include="VirtualDesktopAccessor.dll" LogicalName="VirtualDesktopAccessor.dll" />
+    <!-- Also copied next to the .exe for normal builds -->
+    <None Include="VirtualDesktopAccessor.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>Never</CopyToPublishDirectory>
+    </None>
+  </ItemGroup>
+
+</Project>
