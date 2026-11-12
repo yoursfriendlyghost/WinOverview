@@ -387,20 +387,25 @@ fn stop_hover(app: &Shared) {
 // ===================== actions =====================
 
 fn open_window(app: &Shared, w: WinInfo) {
-    let current = app.borrow().current;
-    hide_then(app, move || {
-        if w.desktop != current {
-            win::switch_desktop(w.desktop);
-        }
-        win::focus_window(w.hwnd);
-    });
+    // Switch first, while the panel still has focus (see win::switch_desktop)
+    if w.desktop != win::current_desktop() {
+        win::switch_desktop(w.desktop);
+    }
+    hide_then(app, move || win::focus_window(w.hwnd));
 }
 
 fn switch_to(app: &Shared, desktop: u32) {
     if desktop >= win::desktop_count() {
         return;
     }
-    hide_then(app, move || win::switch_desktop(desktop));
+    // Switch first, while the panel still has focus, then hand focus to that desktop's top app
+    win::switch_desktop(desktop);
+    let top = win::top_window_on(&app.borrow().windows, desktop);
+    hide_then(app, move || {
+        if let Some(h) = top {
+            win::focus_window(h);
+        }
+    });
 }
 
 /// Moves the desktop's apps to desktop 1 (or 2, if closing desktop 1), then removes it.

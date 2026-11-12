@@ -296,8 +296,33 @@ pub fn current_desktop() -> u32 {
     winvd::get_current_desktop().and_then(|d| d.get_index()).unwrap_or(0)
 }
 
-pub fn switch_desktop(i: u32) {
-    let _ = winvd::switch_desktop(i);
+/// Switch to desktop `i`. Call it while one of our windows still has focus: if an app on the
+/// old desktop has focus, Windows can pull you straight back to it.
+pub fn switch_desktop(i: u32) -> bool {
+    if current_desktop() == i {
+        return true;
+    }
+    let first = winvd::switch_desktop(i);
+    if current_desktop() == i {
+        return true;
+    }
+    // Second try with the taskbar focused, so no app window can hold us on the old desktop
+    unsafe {
+        if let Ok(taskbar) = FindWindowW(w!("Shell_TrayWnd"), None) {
+            let _ = SetForegroundWindow(taskbar);
+        }
+    }
+    let second = winvd::switch_desktop(i);
+    let ok = current_desktop() == i;
+    if !ok {
+        crate::config::log(&format!("Couldn't switch to desktop {}: {first:?} / {second:?}", i + 1));
+    }
+    ok
+}
+
+/// The top-most app window on a desktop (from a list in top-most-first order).
+pub fn top_window_on(windows: &[WinInfo], desktop: u32) -> Option<isize> {
+    windows.iter().find(|w| w.desktop == desktop && !is_minimized(w.hwnd)).map(|w| w.hwnd)
 }
 
 pub fn move_to_desktop(h: isize, i: u32) {

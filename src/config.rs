@@ -45,6 +45,15 @@ pub fn folder() -> PathBuf {
     base.join("WinOverview")
 }
 
+/// Add a line to %AppData%\WinOverview\error.log (for problems worth reporting).
+pub fn log(line: &str) {
+    use std::io::Write;
+    let _ = std::fs::create_dir_all(folder());
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(folder().join("error.log")) {
+        let _ = writeln!(f, "{line}");
+    }
+}
+
 fn file() -> PathBuf {
     folder().join("config.json")
 }
