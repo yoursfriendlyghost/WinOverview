@@ -1,0 +1,548 @@
+// WinOverview UI: the overview panel, the snap picker and the Settings window.
+// All positions are worked out in Rust (src/layout.rs) and passed in as x/y/w/h.
+
+import { LineEdit, SpinBox, CheckBox, Button, Slider, ScrollView } from "std-widgets.slint";
+
+export struct Theme {
+    panel: color, tile: color, tile-hover: color, tile-current: color, border: color,
+    text: color, faint: color, pill: color, cell: color, cell-hover: color, dark: bool,
+}
+
+export struct AppItem {
+    id: int,           // window handle
+    title: string,
+    icon: image,
+    hit: bool,         // matches the search (always true when not searching)
+    live: bool,        // a live preview is drawn over this cell (previews view)
+    x: length, y: length, w: length, h: length,   // inside the tile
+}
+
+export struct DeskItem {
+    index: int,
+    x: length, y: length, w: length, h: length,
+    current: bool,
+    apps: [AppItem],
+    more: int,         // apps that didn't fit (previews view)
+    more-x: length, more-y: length, more-w: length, more-h: length,
+}
+
+export struct Zone { x: float, y: float, w: float, h: float }
+export struct SnapLayout { zones: [Zone] }
+export struct ThemeChoice { name: string, panel: color, tile: color, text: color }
+
+global Palette {
+    in-out property <Theme> t: {
+        panel: #1b1b1f, tile: #ffffff08, tile-hover: #ffffff0f, tile-current: #ffffff12, border: #ffffff16,
+        text: #e6e6ea, faint: #ffffff50, pill: #ffffff20, cell: #ffffff0b, cell-hover: #ffffff1e, dark: true,
+    };
+    in-out property <color> accent: #8ab4f8;
+}
+
+// Small round × button
+component CloseDot inherits Rectangle {
+    callback clicked();
+    in property <length> size: 18px;
+    width: size; height: size;
+    border-radius: size / 2;
+    background: dot.has-hover ? #e5484d : (Palette.t.dark ? #3a3a42 : #6b6b75);
+    border-width: 1px; border-color: #ffffff30;
+    animate background { duration: 100ms; }
+    Text { text: "\u{00D7}"; color: white; font-size: root.size * 0.72; font-weight: 700;
+           horizontal-alignment: center; vertical-alignment: center; }
+    dot := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+}
+
+export component Overview inherits Window {
+    title: "WinOverview";
+    no-frame: true;
+    always-on-top: true;
+    background: Palette.t.panel;
+    width: panel-w;
+    height: panel-h;
+    forward-focus: keys;
+
+    in property <Theme> theme: Palette.t;
+    in property <color> accent: Palette.accent;
+    changed theme => { Palette.t = self.theme; }
+    changed accent => { Palette.accent = self.accent; }
+
+    in property <length> panel-w: 400px;
+    in property <length> panel-h: 200px;
+    in property <[DeskItem]> desks;
+    in property <length> plus-x; in property <length> plus-y;
+    in property <length> plus-w; in property <length> plus-h;
+    in property <bool> previews: false;     // live previews view
+    in property <bool> thumbs-on: false;    // live previews are currently drawn
+    in property <int> selected-id: 0;
+    in property <bool> shown: false;
+    in property <string> query;
+    in property <string> hint: "Type to search  \u{00B7}  arrows + Enter  \u{00B7}  1-9 desktop  \u{00B7}  drag apps between desktops, or out to snap  \u{00B7}  Esc";
+    in property <bool> can-close-desk: true;
+
+    in-out property <bool> dragging: false;
+    in-out property <int> drag-id: 0;
+    in-out property <image> drag-icon;
+    in-out property <length> drag-x;
+    in-out property <length> drag-y;
+
+    callback desk-clicked(int);
+    callback desk-close(int);
+    callback app-clicked(int);
+    callback app-close(int);
+    callback app-hover(int, bool, length, length, length, length);   // id, entered, cell rect in the window
+    callback drag-started(int);
+    callback app-dropped(int, length, length);
+    callback add-clicked();
+    callback key-pressed(string, bool, bool) -> bool;   // text, ctrl, shift
+
+    keys := FocusScope {
+        key-pressed(e) => {
+            if (root.key-pressed(e.text, e.modifiers.control, e.modifiers.shift)) { return accept; }
+            return reject;
+        }
+    }
+
+    // Everything fades and slides in when opened
+    content := Rectangle {
+        opacity: root.shown ? 1 : 0;
+        y: root.shown ? 0 : -6px;
+        animate opacity { duration: 140ms; easing: ease-out; }
+        animate y { duration: 180ms; easing: ease-out; }
+
+        // ---- desktop tiles ----
+        for d in root.desks: Rectangle {
+            property <bool> target: root.dragging
+                && root.drag-x >= d.x && root.drag-x < d.x + d.w
+                && root.drag-y >= d.y && root.drag-y < d.y + d.h;
+
+            x: d.x; y: d.y; width: d.w; height: d.h;
+            animate x, y, width, height { duration: 160ms; easing: ease-out; }
+            border-radius: 12px;
+            background: self.target ? Palette.accent.with-alpha(0.16)
+                      : d.current ? Palette.t.tile-current
+                      : tile.has-hover ? Palette.t.tile-hover : Palette.t.tile;
+            border-width: self.target || d.current ? 1.5px : 1px;
+            border-color: self.target ? Palette.accent
+                        : d.current ? Palette.accent.with-alpha(0.55)
+                        : Palette.t.border;
+            animate background, border-color { duration: 120ms; }
+
+            tile := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { root.desk-clicked(d.index); }
+
+                // number pill
+                Rectangle {
+                    x: 10px; y: 9px; height: 18px;
+                    width: max(18px, num.preferred-width + 12px);
+                    border-radius: 9px;
+                    background: d.current ? Palette.accent : Palette.t.pill;
+                    num := Text {
+                        text: d.index + 1;
+                        color: d.current ? #111216 : Palette.t.text;
+                        font-size: 11px; font-weight: 700;
+                        horizontal-alignment: center; vertical-alignment: center;
+                    }
+                }
+
+                if d.apps.length == 0: Text {
+                    x: 0; y: 34px; width: parent.width; height: parent.height - 40px;
+                    text: "Empty"; color: Palette.t.faint; font-size: 12px;
+                    horizontal-alignment: center; vertical-alignment: center;
+                }
+
+                // apps
+                for a in d.apps: Rectangle {
+                    property <bool> selected: a.id == root.selected-id;
+                    x: a.x; y: a.y; width: a.w; height: a.h;
+                    border-radius: root.previews ? 9px : 11px;
+                    background: self.selected ? Palette.accent.with-alpha(0.25)
+                              : cell.has-hover ? Palette.t.cell-hover : Palette.t.cell;
+                    border-width: self.selected ? 2px : (root.previews && cell.has-hover ? 1px : 0px);
+                    border-color: self.selected ? Palette.accent : Palette.t.border;
+                    opacity: (root.dragging && root.drag-id == a.id) ? 0.25 : (a.hit ? 1 : 0.22);
+                    animate background, opacity { duration: 110ms; }
+
+                    cell := TouchArea {
+                        property <bool> did-drag: false;
+                        mouse-cursor: pointer;
+
+                        changed has-hover => {
+                            root.app-hover(a.id, self.has-hover,
+                                self.absolute-position.x, self.absolute-position.y, self.width, self.height);
+                        }
+                        pointer-event(e) => {
+                            if (e.button == PointerEventButton.left && e.kind == PointerEventKind.down) {
+                                self.did-drag = false;
+                            }
+                            if (e.button == PointerEventButton.left && e.kind == PointerEventKind.up
+                                && root.dragging && root.drag-id == a.id) {
+                                root.dragging = false;
+                                root.app-dropped(a.id, root.drag-x, root.drag-y);
+                            }
+                        }
+                        moved => {
+                            if (self.pressed && !root.dragging
+                                && (abs(self.mouse-x - self.pressed-x) > 6px || abs(self.mouse-y - self.pressed-y) > 6px)) {
+                                self.did-drag = true;
+                                root.drag-id = a.id;
+                                root.drag-icon = a.icon;
+                                root.dragging = true;
+                                root.drag-started(a.id);
+                            }
+                            if (root.dragging && root.drag-id == a.id) {
+                                root.drag-x = self.absolute-position.x + self.mouse-x;
+                                root.drag-y = self.absolute-position.y + self.mouse-y;
+                            }
+                        }
+                        clicked => { if (!self.did-drag) { root.app-clicked(a.id); } }
+
+                        // Icons view: just the icon
+                        if !root.previews: Image {
+                            x: (parent.width - 32px) / 2; y: (parent.height - 32px) / 2;
+                            width: 32px; height: 32px;
+                            source: a.icon;
+                            image-rendering: smooth;
+                        }
+                        if !root.previews && cell.has-hover && !root.dragging: CloseDot {
+                            x: parent.width - 13px; y: -5px;
+                            clicked => { root.app-close(a.id); }
+                        }
+
+                        // Previews view: title strip; the live preview is drawn below it by Windows
+                        if root.previews: Image {
+                            x: 6px; y: 4px; width: 14px; height: 14px;
+                            source: a.icon;
+                            image-rendering: smooth;
+                        }
+                        if root.previews: Text {
+                            x: 25px; y: 2px; width: parent.width - 50px; height: 18px;
+                            text: a.title;
+                            color: Palette.t.text; font-size: 11px;
+                            overflow: elide; vertical-alignment: center;
+                        }
+                        if root.previews && !(a.live && root.thumbs-on): Image {
+                            property <length> s: min(40px, parent.height - 34px);
+                            x: (parent.width - self.s) / 2; y: 22px + (parent.height - 22px - self.s) / 2;
+                            width: self.s; height: self.s;
+                            source: a.icon;
+                            image-rendering: smooth;
+                        }
+                        if root.previews && cell.has-hover && !root.dragging: CloseDot {
+                            size: 16px;
+                            x: parent.width - 19px; y: 3px;
+                            clicked => { root.app-close(a.id); }
+                        }
+                    }
+                }
+
+                // "+N more" (previews view)
+                if d.more > 0: Rectangle {
+                    x: d.more-x; y: d.more-y; width: d.more-w; height: d.more-h;
+                    border-radius: 9px;
+                    background: Palette.t.cell;
+                    Text {
+                        text: "+" + d.more;
+                        color: Palette.t.text; font-size: 18px; font-weight: 600;
+                        horizontal-alignment: center; vertical-alignment: center;
+                    }
+                }
+
+                if tile.has-hover && root.can-close-desk && !root.dragging: CloseDot {
+                    x: parent.width - 26px; y: 8px;
+                    clicked => { root.desk-close(d.index); }
+                }
+            }
+        }
+
+        // ---- "+" new desktop ----
+        Rectangle {
+            property <bool> target: root.dragging
+                && root.drag-x >= root.plus-x && root.drag-x < root.plus-x + root.plus-w
+                && root.drag-y >= root.plus-y && root.drag-y < root.plus-y + root.plus-h;
+            x: root.plus-x; y: root.plus-y; width: root.plus-w; height: root.plus-h;
+            animate x, y, height { duration: 160ms; easing: ease-out; }
+            border-radius: 12px;
+            background: self.target ? Palette.accent.with-alpha(0.16) : plus.has-hover ? Palette.t.tile-hover : transparent;
+            border-width: 1.5px;
+            border-color: self.target ? Palette.accent : Palette.t.border;
+            animate background, border-color { duration: 120ms; }
+            Text {
+                text: "+";
+                color: parent.target ? Palette.accent : Palette.t.faint;
+                font-size: 26px;
+                horizontal-alignment: center; vertical-alignment: center;
+            }
+            plus := TouchArea { mouse-cursor: pointer; clicked => { root.add-clicked(); } }
+        }
+
+        // ---- bottom line: search text or key hints ----
+        Text {
+            x: 16px; y: root.panel-h - 26px; width: root.panel-w - 32px; height: 18px;
+            text: root.dragging ? "Drop on a desktop to move it there  \u{00B7}  on + for a new desktop  \u{00B7}  outside to snap it"
+                : root.query == "" ? root.hint : "Search:  " + root.query;
+            color: root.query == "" || root.dragging ? Palette.t.faint : Palette.t.text;
+            font-size: root.query == "" || root.dragging ? 11px : 13px;
+            overflow: elide;
+            vertical-alignment: center;
+        }
+    }
+
+    // icon following the mouse while dragging
+    if root.dragging: Rectangle {
+        x: root.drag-x - 24px; y: root.drag-y - 24px;
+        width: 48px; height: 48px;
+        border-radius: 12px;
+        background: Palette.t.panel;
+        border-width: 1.5px; border-color: Palette.accent;
+        drop-shadow-blur: 12px; drop-shadow-color: #00000080;
+        Image { x: 8px; y: 8px; width: 32px; height: 32px; source: root.drag-icon; }
+    }
+}
+
+// ================= Snap picker =================
+
+export component SnapPicker inherits Window {
+    title: "WinOverview - snap";
+    no-frame: true;
+    always-on-top: true;
+    background: Palette.t.panel;
+    forward-focus: fs;
+
+    in property <Theme> theme: Palette.t;
+    in property <color> accent: Palette.accent;
+    changed theme => { Palette.t = self.theme; }
+    changed accent => { Palette.accent = self.accent; }
+
+    in property <image> app-icon;
+    in property <string> name;
+    in property <bool> has-partner;
+    in property <image> partner-icon;
+    in property <string> partner-name;
+    in property <[SnapLayout]> layouts;
+    in property <bool> shown;
+
+    callback pick(int, float, float);   // layout, where in it (0..1, 0..1)
+    callback dismiss();
+
+    property <length> card-w: 138px;
+    property <length> card-h: 88px;
+    property <length> gap: 8px;
+
+    width: 3 * card-w + 2 * gap + 28px;
+    height: 70px + ceil(layouts.length / 3) * (card-h + gap) - gap + 14px;
+
+    fs := FocusScope {
+        key-pressed(e) => {
+            if (e.text == Key.Escape) { root.dismiss(); return accept; }
+            return reject;
+        }
+    }
+
+    // header: "<App>  +  <previous app>"
+    HorizontalLayout {
+        x: 14px; y: 12px; width: parent.width - 28px; height: 24px;
+        spacing: 8px;
+        Image { source: root.app-icon; width: 22px; height: 22px; }
+        Text { text: root.name; color: Palette.t.text; font-size: 13px; font-weight: 600;
+               vertical-alignment: center; overflow: elide; max-width: 150px; }
+        if root.has-partner: Text { text: "+"; color: Palette.t.faint; font-size: 13px; vertical-alignment: center; }
+        if root.has-partner: Image { source: root.partner-icon; width: 22px; height: 22px; }
+        if root.has-partner: Text { text: root.partner-name; color: Palette.t.faint; font-size: 13px;
+                                     vertical-alignment: center; overflow: elide; max-width: 150px; }
+        Rectangle { horizontal-stretch: 1; }
+    }
+    Text {
+        x: 14px; y: 40px; height: 18px;
+        text: root.has-partner ? "Pick a spot - the other app fills the rest" : "Pick a spot";
+        color: Palette.t.faint; font-size: 11px;
+    }
+
+    for l[li] in root.layouts: card := Rectangle {
+        pure function zin(z: Zone) -> bool {
+            return pick-area.has-hover
+                && pick-area.mouse-x >= z.x * pick-area.width && pick-area.mouse-x < (z.x + z.w) * pick-area.width
+                && pick-area.mouse-y >= z.y * pick-area.height && pick-area.mouse-y < (z.y + z.h) * pick-area.height;
+        }
+        property <int> partner-index: self.zin(l.zones[0]) ? 1 : 0;
+
+        x: 14px + mod(li, 3) * (root.card-w + root.gap);
+        y: 64px + floor(li / 3) * (root.card-h + root.gap) + (root.shown ? 0 : 8px);
+        width: root.card-w; height: root.card-h;
+        opacity: root.shown ? 1 : 0;
+        animate opacity, y { duration: 200ms; delay: li * 22ms; easing: ease-out; }
+        border-radius: 10px;
+        background: pick-area.has-hover ? Palette.t.cell-hover : Palette.t.cell;
+        border-width: 1px;
+        border-color: pick-area.has-hover ? Palette.accent.with-alpha(0.6) : transparent;
+
+        pick-area := TouchArea {
+            x: 6px; y: 6px; width: parent.width - 12px; height: parent.height - 12px;
+            mouse-cursor: pointer;
+            clicked => { root.pick(li, self.mouse-x / self.width, self.mouse-y / self.height); }
+
+            for z[zi] in l.zones: zr := Rectangle {
+                property <bool> me: card.zin(z);
+                property <bool> partner: root.has-partner && pick-area.has-hover && !self.me
+                    && l.zones.length > 1 && zi == card.partner-index;
+                x: z.x * parent.width + 2px; y: z.y * parent.height + 2px;
+                width: z.w * parent.width - 4px; height: z.h * parent.height - 4px;
+                border-radius: 5px;
+                background: self.me ? Palette.accent : self.partner ? Palette.accent.with-alpha(0.4) : Palette.t.pill;
+                animate background { duration: 90ms; }
+                if zr.me || zr.partner: Image {
+                    width: 16px; height: 16px;
+                    source: zr.me ? root.app-icon : root.partner-icon;
+                }
+            }
+        }
+    }
+}
+
+// ================= Settings =================
+
+component Row inherits HorizontalLayout {
+    in property <string> label;
+    in property <string> note;
+    spacing: 12px;
+    VerticalLayout {
+        alignment: center;
+        horizontal-stretch: 1;
+        Text { text: root.label; font-size: 14px; color: #f0f0f2; }
+        if root.note != "": Text { text: root.note; font-size: 11px; color: #ffffff80; wrap: word-wrap; }
+    }
+    @children
+}
+
+component Heading inherits Text {
+    font-size: 12px; font-weight: 600; color: #ffffff80;
+}
+
+export component Settings inherits Window {
+    title: "WinOverview Settings";
+    icon: @image-url("../assets/icon64.png");
+    preferred-width: 500px;
+    min-width: 440px;
+    preferred-height: 760px;
+    background: #202024;
+
+    in-out property <string> hotkey: "Alt+`";
+    in-out property <bool> previews: false;
+    in-out property <bool> hover-preview: true;
+    in-out property <int> per-row: 5;
+    in-out property <int> top-margin: 10;
+    in-out property <bool> mouse-monitor: true;
+    in-out property <bool> startup: false;
+    in-out property <color> accent: #8ab4f8;
+    in-out property <string> theme: "Midnight";
+    in property <[ThemeChoice]> themes;
+    in property <string> status;
+    in property <bool> status-error: false;
+
+    callback save();
+    callback close-window();
+
+    VerticalLayout {
+        ScrollView {
+            VerticalLayout {
+                padding: 22px;
+                padding-bottom: 8px;
+                spacing: 14px;
+
+                Text { text: "Settings"; font-size: 22px; font-weight: 600; color: white; }
+
+                Heading { text: "GENERAL"; }
+                Row {
+                    label: "Shortcut";
+                    note: "e.g. Alt+`, Ctrl+Alt+Space, Win+Shift+W";
+                    LineEdit { width: 170px; text <=> root.hotkey; placeholder-text: "Alt+`"; }
+                }
+                Row {
+                    label: "Start with Windows";
+                    CheckBox { checked <=> root.startup; }
+                }
+
+                Heading { text: "VIEW"; }
+                Row {
+                    label: "Show apps as";
+                    HorizontalLayout {
+                        spacing: 6px;
+                        Button { text: "Icons"; primary: !root.previews; clicked => { root.previews = false; } }
+                        Button { text: "Live previews"; primary: root.previews; clicked => { root.previews = true; } }
+                    }
+                }
+                Row {
+                    label: "Preview on hover";
+                    note: "Icons view: hover an app to see it live";
+                    CheckBox { checked <=> root.hover-preview; enabled: !root.previews; }
+                }
+                Row {
+                    label: "Desktops per row";
+                    SpinBox { width: 120px; minimum: 1; maximum: 10; value <=> root.per-row; }
+                }
+                Row {
+                    label: "Distance from the top";
+                    note: root.top-margin + "% of the screen height";
+                    Slider { width: 170px; minimum: 0; maximum: 40; value: root.top-margin;
+                             changed(v) => { root.top-margin = round(v); } }
+                }
+                Row {
+                    label: "Open on the monitor with the mouse";
+                    CheckBox { checked <=> root.mouse-monitor; }
+                }
+
+                Heading { text: "LOOK"; }
+                Text { text: "Theme"; font-size: 14px; color: #f0f0f2; }
+                Rectangle {
+                    height: ceil(root.themes.length / 4) * 74px;
+                    for t[i] in root.themes: Rectangle {
+                        property <bool> chosen: t.name == root.theme;
+                        x: mod(i, 4) * (parent.width / 4);
+                        y: floor(i / 4) * 74px;
+                        width: parent.width / 4 - 8px; height: 66px;
+                        border-radius: 10px;
+                        background: t.panel;
+                        border-width: self.chosen ? 2.5px : 1px;
+                        border-color: self.chosen ? root.accent : #ffffff26;
+                        Rectangle {
+                            x: 8px; y: 8px; width: parent.width - 16px; height: 26px;
+                            border-radius: 6px; background: t.tile;
+                            Rectangle { x: 6px; y: 8px; width: 10px; height: 10px; border-radius: 5px; background: root.accent; }
+                            Rectangle { x: 22px; y: 8px; width: 10px; height: 10px; border-radius: 3px; background: t.text.with-alpha(0.5); }
+                        }
+                        Text { x: 8px; y: 40px; text: t.name; color: t.text; font-size: 11px; }
+                        TouchArea { mouse-cursor: pointer; clicked => { root.theme = t.name; } }
+                    }
+                }
+                Row {
+                    label: "Accent colour";
+                    HorizontalLayout {
+                        spacing: 8px;
+                        for c in [#8ab4f8, #a78bfa, #f472b6, #fb923c, #facc15, #34d399, #e5e7eb]: Rectangle {
+                            width: 24px; height: 24px; border-radius: 12px;
+                            background: c;
+                            border-width: root.accent == c ? 3px : 0px;
+                            border-color: white;
+                            TouchArea { mouse-cursor: pointer; clicked => { root.accent = c; } }
+                        }
+                    }
+                }
+            }
+        }
+
+        HorizontalLayout {
+            padding: 16px;
+            padding-top: 10px;
+            spacing: 10px;
+            Text {
+                horizontal-stretch: 1;
+                text: root.status;
+                color: root.status-error ? #ff8a8a : #9be3a6;
+                vertical-alignment: center;
+                wrap: word-wrap;
+            }
+            Button { text: "Close"; clicked => { root.close-window(); } }
+            Button { text: "Save"; primary: true; clicked => { root.save(); } }
+        }
+    }
+}

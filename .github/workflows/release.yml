@@ -1,0 +1,43 @@
+# Builds WinOverview.exe on GitHub's servers.
+# - Every push: the .exe is under the run's "Artifacts" (Actions tab)
+# - Push a tag like v2.0.0: also creates a GitHub Release with the .exe attached
+name: Build
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Collect files
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target/release/winoverview.exe dist/WinOverview.exe
+          Copy-Item uninstall.bat dist/uninstall.bat
+          "{0:N1} MB" -f ((Get-Item dist/WinOverview.exe).Length / 1MB)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WinOverview
+          path: dist/*
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: WinOverview ${{ github.ref_name }}
+          generate_release_notes: true
+          files: dist/*
