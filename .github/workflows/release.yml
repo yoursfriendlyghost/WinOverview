@@ -58,7 +58,8 @@ jobs:
 
       - name: Sizes
         shell: pwsh
-        run: Get-ChildItem dist/*.exe | ForEach-Object { "{0}: {1:N1} MB" -f $_.Name, ($_.Length / 1MB) }
+        run: |
+          Get-ChildItem dist/*.exe | ForEach-Object { "{0}: {1:N1} MB" -f $_.Name, ($_.Length / 1MB) }
 
       - uses: actions/upload-artifact@v4
         with:
