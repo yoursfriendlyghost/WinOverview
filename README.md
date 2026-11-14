@@ -5,6 +5,8 @@ Inspired by Hyprland's quickshell-overview.
 
 ![WinOverview](docs/overview.png)
 
+https://github.com/user-attachments/assets/cf030b0d-e69a-4de0-8b2d-efcb17a8bd39
+
 **[⬇ Download the latest release](../../releases/latest)** · Windows 11 · Free & open source (MIT)
 
 One small `.exe`, nothing else to install.
