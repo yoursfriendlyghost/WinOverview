@@ -119,7 +119,7 @@ fn main() {
     }
 
     if winvd::get_desktop_count().is_err() {
-        win::message_box("Couldn't read your virtual desktops.\nWinOverview needs Windows 11 (24H2 or newer).");
+        win::message_box("Couldn't read your virtual desktops.\nWinOverview needs Windows 11.");
         return;
     }
 
