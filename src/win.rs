@@ -516,3 +516,26 @@ pub fn message_box(text: &str) {
         MessageBoxW(None, PCWSTR(t.as_ptr()), w!("WinOverview"), MB_OK | MB_ICONWARNING);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_vdesktop_create_and_remove() {
+        let initial_count = desktop_count();
+        println!("Initial desktop count: {}", initial_count);
+        let new_idx = create_desktop();
+        println!("Created desktop index: {:?}", new_idx);
+        assert!(new_idx.is_some(), "create_desktop failed");
+        let count_after_create = desktop_count();
+        println!("Count after create: {}", count_after_create);
+        assert_eq!(count_after_create, initial_count + 1);
+
+        let created = new_idx.unwrap();
+        remove_desktop(created, 0);
+        let count_after_remove = desktop_count();
+        println!("Count after remove: {}", count_after_remove);
+        assert_eq!(count_after_remove, initial_count);
+    }
+}
