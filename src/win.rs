@@ -41,9 +41,18 @@ pub fn list_windows(exclude: &[isize], current: u32) -> Vec<WinInfo> {
         let _ = EnumWindows(Some(collect), LPARAM(&mut handles as *mut _ as isize));
     }
 
+    let me = unsafe { GetCurrentProcessId() };
     let mut out = Vec::new();
     for h in handles {
         if exclude.contains(&h) {
+            continue;
+        }
+        // Never list our own windows (panel, widgets, settings, snap picker)
+        let mut pid = 0u32;
+        unsafe {
+            GetWindowThreadProcessId(hwnd(h), Some(&mut pid));
+        }
+        if pid == me {
             continue;
         }
         let w = hwnd(h);
@@ -337,6 +346,13 @@ pub fn pin(h: isize) {
     let _ = winvd::pin_window(hwnd(h));
 }
 
+/// Move desktop `from` to position `to` (both 0-based).
+pub fn move_desktop(from: u32, to: u32) {
+    if let Err(e) = winvd::move_desktop(from, to) {
+        crate::config::log(&format!("Couldn't move desktop {} to {}: {e:?}", from + 1, to + 1));
+    }
+}
+
 /// Returns the new desktop's number.
 pub fn create_desktop() -> Option<u32> {
     winvd::create_desktop().ok().and_then(|d| d.get_index().ok())
@@ -508,6 +524,56 @@ pub fn single_instance(wait: bool) -> bool {
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
     false
+}
+
+/// A window's rectangle on screen: (left, top, right, bottom).
+pub fn window_rect(h: isize) -> Option<(i32, i32, i32, i32)> {
+    let mut r = RECT::default();
+    unsafe { GetWindowRect(hwnd(h), &mut r).ok()? };
+    Some((r.left, r.top, r.right, r.bottom))
+}
+
+/// The mouse position on screen (physical pixels).
+pub fn cursor_pos() -> (i32, i32) {
+    let mut pt = POINT::default();
+    unsafe {
+        let _ = GetCursorPos(&mut pt);
+    }
+    (pt.x, pt.y)
+}
+
+/// Make `owner` own window `h`: no taskbar button of its own, always in front of its owner,
+/// and it goes wherever the owner goes.
+pub fn set_owner(h: isize, owner: isize) {
+    if h == 0 || owner == 0 {
+        return;
+    }
+    unsafe {
+        SetWindowLongPtrW(hwnd(h), GWLP_HWNDPARENT, owner);
+    }
+}
+
+/// Start an app from its Windows app id (e.g. "Spotify.exe" or "SpotifyAB.SpotifyMusic_...!Spotify").
+pub fn open_app(app_id: &str) {
+    let target = format!("shell:AppsFolder\\{app_id}");
+    let wide: Vec<u16> = target.encode_utf16().chain(Some(0)).collect();
+    unsafe {
+        ShellExecuteW(None, w!("open"), PCWSTR(wide.as_ptr()), None, None, SW_SHOWNORMAL);
+    }
+}
+
+/// A sound and a small message that doesn't hold anything up (timer finished).
+pub fn alert(text: &str) {
+    unsafe {
+        let _ = windows::Win32::System::Diagnostics::Debug::MessageBeep(MB_ICONINFORMATION);
+    }
+    let text = text.to_string();
+    std::thread::spawn(move || {
+        let t: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
+        unsafe {
+            MessageBoxW(None, PCWSTR(t.as_ptr()), w!("WinOverview"), MB_OK | MB_ICONINFORMATION | MB_TOPMOST | MB_SETFOREGROUND);
+        }
+    });
 }
 
 pub fn message_box(text: &str) {

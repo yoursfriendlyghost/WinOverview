@@ -1,6 +1,12 @@
 # Builds WinOverview.exe on GitHub's servers.
-# - Every push: the .exe is under the run's "Artifacts" (Actions tab)
-# - Push a tag like v2.0.0: also creates a GitHub Release with the .exe attached
+# - Every push: the files are under the run's "Artifacts" (Actions tab)
+# - Push a tag like v2.1.0: also creates a GitHub Release with them attached
+#
+# Two exes come out:
+#   WinOverview.exe        - the normal one
+#   WinOverview-small.exe  - the same app squeezed with UPX (about a third of the size). It unpacks
+#                            itself when it starts. Some antivirus tools are suspicious of packed
+#                            exes, so the normal one is the main download.
 name: Build
 
 on:
@@ -10,24 +16,49 @@ on:
 permissions:
   contents: write
 
+env:
+  UPX_VERSION: "4.2.4"
+
 jobs:
   build:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rust-src
       - uses: Swatinem/rust-cache@v2
 
+      # Rebuilds Rust's standard library tuned for size as well (saves a few hundred KB).
+      # RUSTC_BOOTSTRAP lets the normal (stable) Rust use this option.
       - name: Build
-        run: cargo build --release
+        env:
+          RUSTC_BOOTSTRAP: "1"
+        run: >
+          cargo build --release --target x86_64-pc-windows-msvc
+          -Z build-std=std,panic_abort -Z build-std-features=optimize_for_size
 
       - name: Collect files
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
-          Copy-Item target/release/winoverview.exe dist/WinOverview.exe
+          Copy-Item target/x86_64-pc-windows-msvc/release/winoverview.exe dist/WinOverview.exe
           Copy-Item uninstall.bat dist/uninstall.bat
-          "{0:N1} MB" -f ((Get-Item dist/WinOverview.exe).Length / 1MB)
+
+      - name: Make the small exe (UPX)
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $zip = "upx.zip"
+          Invoke-WebRequest "https://github.com/upx/upx/releases/download/v$env:UPX_VERSION/upx-$env:UPX_VERSION-win64.zip" -OutFile $zip
+          Expand-Archive $zip -DestinationPath upx
+          $upx = Get-ChildItem upx -Recurse -Filter upx.exe | Select-Object -First 1
+          Copy-Item dist/WinOverview.exe dist/WinOverview-small.exe
+          & $upx.FullName --best --lzma dist/WinOverview-small.exe
+
+      - name: Sizes
+        shell: pwsh
+        run: Get-ChildItem dist/*.exe | ForEach-Object { "{0}: {1:N1} MB" -f $_.Name, ($_.Length / 1MB) }
 
       - uses: actions/upload-artifact@v4
         with:

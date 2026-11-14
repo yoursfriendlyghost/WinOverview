@@ -155,6 +155,15 @@ where
     with_com_objects(move |o| o.switch_desktop(&desktop.into().into()))
 }
 
+/// Move a desktop (by index or GUID) to position `index` (0 = first). Added for WinOverview.
+pub fn move_desktop<T>(desktop: T, index: u32) -> Result<()>
+where
+    T: Into<Desktop>,
+    T: Send + 'static + Copy,
+{
+    with_com_objects(move |o| o.move_desktop(&desktop.into().into(), index))
+}
+
 /// Remove desktop by index or GUID
 pub fn remove_desktop<T>(desktop: T, fallback_desktop: T) -> Result<()>
 where

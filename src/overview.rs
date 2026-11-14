@@ -6,10 +6,11 @@ use std::time::{Duration, Instant};
 use slint::platform::Key;
 use slint::{ComponentHandle, ModelRc, SharedString, Timer, TimerMode, VecModel};
 
-use crate::layout::{self, Mode, Rect};
+use crate::layout::{self, Mode, Orient, Rect, Widget};
 use crate::thumbs::{self, Px, ThumbSpec};
 use crate::win::{self, WinInfo};
-use crate::{snap, AppItem, DeskItem, Overview, Shared};
+use crate::config::Config;
+use crate::{free, snap, widget_ui, AppItem, DeskItem, Overview, Shared, WidgetFlags, WidgetSlot};
 
 // ===================== open / close =====================
 
@@ -61,9 +62,15 @@ pub fn show(app: &Shared) {
     if h != 0 {
         win::bring_to_front(h);
     }
+    ui.invoke_focus_keys();
+    free::show(app);
+    if h != 0 {
+        win::bring_to_front(h); // the panel keeps the keyboard
+    }
     let ui2 = ui.clone_strong();
     Timer::single_shot(Duration::from_millis(16), move || ui2.set_shown(true));
     sync_thumbs_later(app, 210); // once the panel has slid into place
+    widget_ui::panel_opened(app);
 
     // Close when another window takes focus (clicking outside, Alt+Tab, Start menu...)
     let weak = Rc::downgrade(app);
@@ -75,7 +82,9 @@ pub fn show(app: &Shared) {
                 && a.hwnd != 0
                 && a.shown_at.elapsed() > Duration::from_millis(350)
                 && !a.ui.get_dragging()
+                && !a.editing
                 && win::foreground() != a.hwnd
+                && !free::hwnds(&a).contains(&win::foreground())
         };
         if lost {
             hide(&app);
@@ -84,6 +93,11 @@ pub fn show(app: &Shared) {
 }
 
 pub fn hide(app: &Shared) {
+    if app.borrow().editing {
+        finish_edit(app);
+    }
+    widget_ui::panel_closed(app);
+    free::hide(app);
     let ui = {
         let mut a = app.borrow_mut();
         a.visible = false;
@@ -117,20 +131,60 @@ pub fn window_handle(window: &slint::Window) -> isize {
     }
 }
 
-/// Size the window to the panel and put it near the top of the screen.
+/// Size the window to the panel and put it where it belongs: the spot picked in edit mode,
+/// or centred near the top of the screen.
 fn place(app: &Shared) {
     let a = app.borrow();
     let m = &a.monitor;
     let (w, h) = (a.layout.width, a.layout.height);
     let pw = (w * m.scale) as i32;
     let ph = (h * m.scale) as i32;
-    let x = m.left + (m.width - pw) / 2;
-    let mut y = m.top + (m.height as f64 * a.config.top_margin_percent / 100.0) as i32;
-    if y + ph > m.top + m.height {
-        y = (m.top + m.height - ph).max(m.top);
-    }
+    let c = &a.config;
+    let (x, y) = if c.panel_x >= 0.0 && c.panel_y >= 0.0 {
+        // Fractions of the free space, so it stays on screen whatever the panel's size
+        let x = m.left + ((m.width - pw).max(0) as f64 * c.panel_x).round() as i32;
+        let y = m.top + ((m.height - ph).max(0) as f64 * c.panel_y).round() as i32;
+        (x, y)
+    } else {
+        let x = m.left + (m.width - pw) / 2;
+        let mut y = m.top + (m.height as f64 * c.top_margin_percent / 100.0) as i32;
+        if y + ph > m.top + m.height {
+            y = (m.top + m.height - ph).max(m.top);
+        }
+        (x, y)
+    };
     a.ui.window().set_position(slint::PhysicalPosition::new(x, y));
     a.ui.window().set_size(slint::LogicalSize::new(w, h));
+    drop(a);
+    app.borrow_mut().panel_rect = (x, y, pw, ph);
+}
+
+/// Resize to the panel without moving it (edit mode), but keep it on screen.
+fn resize_in_place(app: &Shared) {
+    let a = app.borrow();
+    let win = a.ui.window();
+    let scale = win.scale_factor();
+    let (w, h) = (a.layout.width, a.layout.height);
+    let (pw, ph) = ((w * scale) as i32, (h * scale) as i32);
+    let pos = win.position();
+    let (work, _) = win::monitor_at(pos.x + pw / 2, pos.y + 10);
+    let x = pos.x.clamp(work.left, (work.left + work.width - pw).max(work.left));
+    let y = pos.y.clamp(work.top, (work.top + work.height - ph).max(work.top));
+    if (x, y) != (pos.x, pos.y) {
+        win.set_position(slint::PhysicalPosition::new(x, y));
+    }
+    win.set_size(slint::LogicalSize::new(w, h));
+}
+
+/// Relayout and resize after a change (keeps the spot in edit mode).
+fn relayout(app: &Shared) {
+    refresh(app);
+    if app.borrow().editing {
+        resize_in_place(app);
+    } else {
+        place(app);
+    }
+    sync_thumbs_later(app, 200);
 }
 
 // ===================== contents =====================
@@ -160,7 +214,29 @@ pub fn refresh(app: &Shared) {
 
     let counts: Vec<usize> = (0..count).map(|d| windows.iter().filter(|w| w.desktop == d).count()).collect();
     let max_w = a.monitor.width as f32 / a.monitor.scale - 24.0;
-    a.layout = layout::compute(&counts, a.config.desktops_per_row as usize, mode(&a), max_w);
+    let max_h = a.monitor.height as f32 / a.monitor.scale - 24.0;
+    // Free layout: the widgets are their own windows (src/free.rs), not in the panel
+    let widgets = if a.config.free() { Vec::new() } else { a.config.widget_list() };
+    let opts = layout::Options {
+        apps: &counts,
+        per_row: a.config.desktops_per_row as usize,
+        mode: mode(&a),
+        orient: if a.config.desktops_vertical() { Orient::Vertical } else { Orient::Horizontal },
+        widgets: &widgets,
+        widgets_first: a.config.widgets_first,
+        max_w,
+        max_h,
+        top: if a.editing {
+            layout::EDIT_BAR
+        } else if !a.query.is_empty() {
+            layout::SEARCH_BAR
+        } else {
+            0.0
+        },
+        widget_w: a.config.widget_size_px().0,
+        widget_h: a.config.widget_size_px().1,
+    };
+    a.layout = layout::compute(&opts);
     a.windows = windows;
     a.current = current;
     drop(a);
@@ -181,7 +257,7 @@ pub fn update_model(app: &Shared) {
 
         // When searching, keep the selection on something that matches
         if !query.is_empty() {
-            let sel_hits = a.selected.is_some_and(|s| a.windows.iter().any(|w| w.hwnd == s && matches(w, &query)));
+            let sel_hits = a.selected.is_some_and(|s| a.windows.iter().any(|w| w.hwnd == s && matches(&a.config, w, &query)));
             if !sel_hits {
                 a.selected = ordered(&a, &query).first().copied();
             }
@@ -202,10 +278,11 @@ pub fn update_model(app: &Shared) {
                 let icon = a.icons.get(w);
                 apps.push(AppItem {
                     id: w.hwnd as i32,
-                    title: w.title.as_str().into(),
+                    title: if private(&a.config, w) { win::exe_name(&w.exe).into() } else { w.title.as_str().into() },
                     icon,
-                    hit: query.is_empty() || matches(w, &query),
-                    live: previews && !win::is_minimized(w.hwnd),
+                    hit: query.is_empty() || matches(&a.config, w, &query),
+                    live: previews && !win::is_minimized(w.hwnd) && !private(&a.config, w),
+                    private: private(&a.config, w),
                     x: cell.x,
                     y: cell.y,
                     w: cell.w,
@@ -237,21 +314,37 @@ pub fn update_model(app: &Shared) {
         ui.set_panel_w(a.layout.width);
         ui.set_panel_h(a.layout.height);
         ui.set_can_close_desk(a.layout.desks.len() > 1);
+        let slots: Vec<WidgetSlot> = a
+            .layout
+            .widgets
+            .iter()
+            .map(|(k, r)| WidgetSlot { kind: *k as i32, x: r.x, y: r.y, w: r.w, h: r.h })
+            .collect();
+        ui.set_widget_slots(ModelRc::new(VecModel::from(slots)));
+        ui.set_edit_mode(a.editing);
+        ui.set_custom_position(a.config.panel_x >= 0.0 || a.config.widget_groups.iter().any(|g| g.x >= 0.0));
         ui.set_query(a.query.as_str().into());
+        ui.set_matches(if query.is_empty() { 0 } else { ordered(&a, &query).len() as i32 });
         ui.set_selected_id(a.selected.map_or(0, |s| s as i32));
     }
     sync_thumbs(app);
 }
 
-fn matches(w: &WinInfo, query: &str) -> bool {
-    w.title.to_lowercase().contains(query) || win::exe_name(&w.exe).to_lowercase().contains(query)
+/// Does a window match the search? Private apps only by their app name, never their title.
+fn matches(c: &Config, w: &WinInfo, query: &str) -> bool {
+    let name = win::exe_name(&w.exe).to_lowercase();
+    name.contains(query) || (!c.is_private(&name) && w.title.to_lowercase().contains(query))
+}
+
+fn private(c: &Config, w: &WinInfo) -> bool {
+    c.is_private(&win::exe_name(&w.exe))
 }
 
 /// Shown apps in on-screen order (desktop by desktop), only search matches when searching.
 fn ordered(a: &crate::App, query: &str) -> Vec<isize> {
     (0..a.layout.desks.len())
         .flat_map(|d| on_desk(a, d))
-        .filter(|w| query.is_empty() || matches(w, query))
+        .filter(|w| query.is_empty() || matches(&a.config, w, query))
         .map(|w| w.hwnd)
         .collect()
 }
@@ -265,9 +358,7 @@ pub fn refresh_soon(app: &Shared, ms: u64) {
     Timer::single_shot(Duration::from_millis(ms), move || {
         if let Some(app) = weak.upgrade() {
             if app.borrow().visible {
-                refresh(&app);
-                place(&app);
-                sync_thumbs_later(&app, 120);
+                relayout(&app);
             }
         }
     });
@@ -304,7 +395,7 @@ fn sync_thumbs(app: &Shared) {
     let mut specs = Vec::new();
     for (i, d) in a.layout.desks.iter().enumerate() {
         for (w, cell) in on_desk(&a, i).into_iter().zip(&d.cells) {
-            if win::is_minimized(w.hwnd) {
+            if win::is_minimized(w.hwnd) || private(&a.config, w) {
                 continue;
             }
             let Some((frame, source)) = thumbs::frame_of(w.hwnd) else { continue };
@@ -317,7 +408,7 @@ fn sync_thumbs(app: &Shared) {
             };
             let area = Px { left: px(body.x), top: px(body.y), right: px(body.x + body.w), bottom: px(body.y + body.h) };
             let dest = thumbs::fit(area, frame.width(), frame.height());
-            let hit = query.is_empty() || matches(w, &query);
+            let hit = query.is_empty() || matches(&a.config, w, &query);
             specs.push(ThumbSpec { target: w.hwnd, dest, source, opacity: if hit { 255 } else { 55 } });
         }
     }
@@ -342,7 +433,12 @@ fn on_hover(app: &Shared, id: i32, entered: bool, cell: Rect) {
         }
         return;
     }
-    if mode(&a) != Mode::Icons || !a.config.hover_preview || a.ui.get_dragging() || win::is_minimized(w.hwnd) {
+    if mode(&a) != Mode::Icons
+        || !a.config.hover_preview
+        || a.ui.get_dragging()
+        || win::is_minimized(w.hwnd)
+        || private(&a.config, &w)
+    {
         return;
     }
     a.hover_id = w.hwnd;
@@ -386,7 +482,7 @@ fn stop_hover(app: &Shared) {
 
 // ===================== actions =====================
 
-fn open_window(app: &Shared, w: WinInfo) {
+pub fn open_window(app: &Shared, w: WinInfo) {
     // Switch first, while the panel still has focus (see win::switch_desktop)
     if w.desktop != win::current_desktop() {
         win::switch_desktop(w.desktop);
@@ -461,18 +557,169 @@ fn dropped(app: &Shared, id: i32, x: f32, y: f32) {
     sync_thumbs_later(app, 30); // nothing moved: bring the previews back
 }
 
+// ===================== edit mode =====================
+
+pub fn flags(c: &Config) -> WidgetFlags {
+    WidgetFlags {
+        notes: c.has_widget(Widget::Notes),
+        music: c.has_widget(Widget::Music),
+        timer: c.has_widget(Widget::Timer),
+        weather: c.has_widget(Widget::Weather),
+        calendar: c.has_widget(Widget::Calendar),
+    }
+}
+
+/// Open the panel (if needed) with the edit toolbar: move it, pick row/column and widgets.
+pub fn edit_start(app: &Shared) {
+    if !app.borrow().visible {
+        show(app);
+    }
+    app.borrow_mut().editing = true;
+    free::set_edit(app, true);
+    stop_hover(app);
+    relayout(app);
+}
+
+/// Save where the panel is now, and leave edit mode.
+fn finish_edit(app: &Shared) {
+    let mut a = app.borrow_mut();
+    a.editing = false;
+    if a.hwnd != 0 {
+        if let Some(r) = win::window_rect(a.hwnd) {
+            // The toolbar goes away, so measure from just under it
+            let scale = a.ui.window().scale_factor();
+            let bar = (layout::EDIT_BAR * scale) as i32;
+            let (x, y, w, h) = (r.0, r.1 + bar, r.2 - r.0, r.3 - r.1 - bar);
+            let (work, _) = win::monitor_at(x + w / 2, y + h / 2);
+            let fx = if work.width > w { (x - work.left) as f64 / (work.width - w) as f64 } else { 0.5 };
+            let fy = if work.height > h { (y - work.top) as f64 / (work.height - h) as f64 } else { 0.0 };
+            a.config.panel_x = fx.clamp(0.0, 1.0);
+            a.config.panel_y = fy.clamp(0.0, 1.0);
+            // Within a few pixels of the middle: snap to the middle
+            let centre = work.left + (work.width - w) / 2;
+            if (x - centre).abs() <= (12.0 * scale) as i32 {
+                a.config.panel_x = 0.5;
+            }
+        }
+    }
+    free::save_positions(&mut a);
+    let _ = a.config.save();
+    drop(a);
+    free::set_edit(app, false);
+}
+
+fn edit_done(app: &Shared) {
+    finish_edit(app);
+    {
+        let mut a = app.borrow_mut();
+        a.monitor = {
+            let r = win::window_rect(a.hwnd).unwrap_or_default();
+            win::monitor_at((r.0 + r.2) / 2, (r.1 + r.3) / 2).0
+        };
+    }
+    relayout(app);
+}
+
+/// Back to the default spots: panel centred near the top, widgets next to it.
+pub fn reset_position(app: &Shared) {
+    {
+        let mut a = app.borrow_mut();
+        a.config.panel_x = -1.0;
+        a.config.panel_y = -1.0;
+        free::reset_positions(&mut a);
+        let _ = a.config.save();
+    }
+    if app.borrow().visible {
+        relayout(app);
+        free::show(app);
+        update_model(app);
+    }
+}
+
+/// Move the panel (`which` = None) or a capsule (`which` = Some(i)) with the mouse, in edit mode.
+/// step: 0 = button pressed, 1 = mouse moved, 2 = button released.
+pub fn drag_window(app: &Shared, which: Option<usize>, step: i32) {
+    let mut a = app.borrow_mut();
+    let position = |a: &crate::App| match which {
+        None => Some(a.ui.window().position()),
+        Some(i) => a.widget_windows.get(i).map(|c| c.window.window().position()),
+    };
+    match step {
+        0 => {
+            if let Some(p) = position(&a) {
+                a.moving = Some((which, win::cursor_pos(), (p.x, p.y)));
+            }
+        }
+        1 => {
+            let Some((w, (cx, cy), (wx, wy))) = a.moving else { return };
+            if w != which {
+                return;
+            }
+            let (nx, ny) = win::cursor_pos();
+            let to = slint::PhysicalPosition::new(wx + nx - cx, wy + ny - cy);
+            match which {
+                None => a.ui.window().set_position(to),
+                Some(i) => {
+                    if let Some(c) = a.widget_windows.get(i) {
+                        c.window.window().set_position(to);
+                    }
+                }
+            }
+        }
+        _ => a.moving = None,
+    }
+}
+
+/// A desktop was dragged onto another one: move it to that position.
+fn desk_dropped(app: &Shared, from: i32, x: f32, y: f32) {
+    let target = app.borrow().layout.desks.iter().position(|d| d.rect.contains(x, y));
+    if let Some(to) = target {
+        if to as i32 != from && from >= 0 {
+            win::move_desktop(from as u32, to as u32);
+            refresh_soon(app, 80);
+        }
+    }
+}
+
+/// Right-click on an app: hide / show its preview (privacy mode).
+fn toggle_private(app: &Shared, id: i32) {
+    let Some(w) = find(app, id) else { return };
+    let name = win::exe_name(&w.exe);
+    if name.is_empty() {
+        return;
+    }
+    {
+        let mut a = app.borrow_mut();
+        let now_private = !a.config.is_private(&name);
+        if now_private {
+            a.config.privacy_mode = true;
+        }
+        a.config.set_private(&name, now_private);
+        let _ = a.config.save();
+    }
+    stop_hover(app);
+    update_model(app);
+}
+
 // ===================== keyboard =====================
 
 fn on_key(app: &Shared, text: &str, ctrl: bool, shift: bool) -> bool {
     let k = |key: Key| SharedString::from(key);
     let t = SharedString::from(text);
 
+    if app.borrow().editing {
+        if t == k(Key::Escape) || t == k(Key::Return) {
+            edit_done(app);
+        }
+        return true;
+    }
+
     if t == k(Key::Escape) {
         if app.borrow().query.is_empty() {
             hide(app);
         } else {
             app.borrow_mut().query.clear();
-            update_model(app);
+            search_changed(app, true);
         }
     } else if t == k(Key::Return) {
         let sel = app.borrow().selected;
@@ -480,8 +727,9 @@ fn on_key(app: &Shared, text: &str, ctrl: bool, shift: bool) -> bool {
             open_window(app, w);
         }
     } else if t == k(Key::Backspace) {
+        let was = !app.borrow().query.is_empty();
         app.borrow_mut().query.pop();
-        update_model(app);
+        search_changed(app, was);
     } else if t == k(Key::Delete) {
         if let Some(s) = app.borrow().selected {
             win::close_window(s);
@@ -512,9 +760,22 @@ fn on_key(app: &Shared, text: &str, ctrl: bool, shift: bool) -> bool {
             return true;
         }
         app.borrow_mut().query.push(c);
-        update_model(app);
+        search_changed(app, searching);
     }
     true
+}
+
+/// The search text changed. When the search capsule appears or goes, the panel grows or shrinks
+/// (its top edge stays put).
+fn search_changed(app: &Shared, was_searching: bool) {
+    let searching = !app.borrow().query.is_empty();
+    if searching == was_searching {
+        update_model(app);
+        return;
+    }
+    refresh(app);
+    resize_in_place(app);
+    sync_thumbs_later(app, 200);
 }
 
 enum Dir {
@@ -611,6 +872,16 @@ pub fn wire(app: &Shared) {
     ui.on_add_clicked(with!(|app| {
         add_desktop(app);
     }));
+
+    ui.on_edit_start(with!(|app| edit_start(app)));
+    ui.on_edit_drag(with!(|app, step| drag_window(app, None, step)));
+    ui.on_app_private(with!(|app, id| toggle_private(app, id)));
+    ui.on_desk_dropped(with!(|app, from, x, y| desk_dropped(app, from, x, y)));
+    ui.on_edit_reset(with!(|app| {
+        reset_position(app);
+        relayout(app);
+    }));
+    ui.on_edit_done(with!(|app| edit_done(app)));
 
     let w1 = w.clone();
     ui.on_key_pressed(move |text, ctrl, shift| match w1.upgrade() {

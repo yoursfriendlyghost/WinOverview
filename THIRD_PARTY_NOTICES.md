@@ -11,4 +11,6 @@ WinOverview is built on these libraries:
 | [global-hotkey](https://github.com/tauri-apps/global-hotkey) | Keyboard shortcut | MIT or Apache-2.0, © Tauri Programme |
 | [serde](https://serde.rs), serde_json | Settings file | MIT or Apache-2.0 |
 
+Weather data comes from [Open-Meteo](https://open-meteo.com), licensed under CC BY 4.0.
+
 Each library's full license text ships with its source code (see the links above).

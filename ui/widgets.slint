@@ -1,0 +1,461 @@
+// The widgets: notes, music, timer, weather, calendar. Their data lives in the WidgetState global,
+// which Rust fills in (src/widgets.rs, src/overview.rs).
+
+import { Palette, Chip, Glyph, RoundButton } from "common.slint";
+
+export struct NoteItem { text: string, done: bool }
+export struct CalDay { day: int, this-month: bool, today: bool }
+
+export global WidgetState {
+    // notes: a checklist; click an item to strike it through
+    in property <[NoteItem]> notes;
+    in property <bool> notes-has-done: false;
+    callback note-add(string);
+    callback note-toggle(int);
+    callback note-delete(int);
+    callback clear-done();
+
+    // calendar
+    in property <string> cal-title;     // "November 2026"
+    in property <[CalDay]> cal-days;    // 6 weeks, Monday first
+    in property <bool> cal-is-now: true; // showing this month
+    callback cal-prev();
+    callback cal-next();
+    callback cal-today();
+
+    // music
+    in property <bool> music-on: false;       // something is playing / paused
+    in property <string> music-title;
+    in property <string> music-artist;
+    in property <bool> music-playing: false;
+    in property <image> music-art;
+    in property <bool> music-has-art: false;
+    callback music-prev();
+    callback music-toggle();
+    callback music-next();
+    callback music-open();
+
+    // timer
+    in property <string> timer-text: "25:00";
+    in property <float> timer-progress: 0;    // 0..1
+    in property <bool> timer-running: false;
+    in property <bool> timer-started: false;  // running or paused
+    in property <bool> timer-done: false;
+    in property <int> timer-minutes: 25;
+    callback timer-preset(int);
+    callback timer-toggle();
+    callback timer-reset();
+
+    // weather
+    in property <bool> weather-ok: false;
+    in property <string> weather-message: "Set your city in Settings";
+    in property <string> weather-temp;
+    in property <string> weather-desc;
+    in property <string> weather-place;
+    in property <string> weather-range;
+    in property <int> weather-icon: 0;
+    callback weather-refresh();
+}
+
+component Card inherits Rectangle {
+    in property <string> title;
+    border-radius: 12px;
+    background: Palette.t.tile;
+    border-width: 1px;
+    border-color: Palette.t.border;
+    Text {
+        x: 12px; y: 9px;
+        text: root.title;
+        color: Palette.t.faint; font-size: 10px; font-weight: 700;
+    }
+    @children
+}
+
+// ---------- notes ----------
+
+component NotesCard inherits Card {
+    callback escape();
+    title: "NOTES";
+
+    // "clear done" button, top right, when something is struck through
+    if WidgetState.notes-has-done: Text {
+        x: parent.width - self.preferred-width - 12px; y: 8px;
+        text: "Clear done";
+        color: clear-ta.has-hover ? Palette.accent : Palette.t.faint;
+        font-size: 10px; font-weight: 700;
+        clear-ta := TouchArea { mouse-cursor: pointer; clicked => { WidgetState.clear-done(); } }
+    }
+
+    list := Flickable {
+        x: 6px; y: 26px; width: parent.width - 12px; height: parent.height - 60px;
+        content-height: max(self.height, WidgetState.notes.length * 24px);
+        for item[i] in WidgetState.notes: Rectangle {
+            y: i * 24px; width: list.width; height: 24px;
+            border-radius: 6px;
+            background: row.has-hover ? Palette.t.cell : transparent;
+            row := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { WidgetState.note-toggle(i); }
+            }
+            // tick circle
+            Rectangle {
+                x: 6px; y: 6px; width: 12px; height: 12px; border-radius: 6px;
+                border-width: 1.5px;
+                border-color: item.done ? Palette.accent : Palette.t.faint;
+                background: item.done ? Palette.accent : transparent;
+            }
+            label := Text {
+                x: 24px; width: parent.width - 48px; height: parent.height;
+                text: item.text;
+                color: item.done ? Palette.t.faint : Palette.t.text;
+                font-size: 12px;
+                overflow: elide; vertical-alignment: center;
+            }
+            // the strike-through line
+            if item.done: Rectangle {
+                x: 23px; y: parent.height / 2;
+                width: min(label.preferred-width, label.width) + 2px; height: 1.2px;
+                background: Palette.t.faint;
+            }
+            if row.has-hover: Text {
+                x: parent.width - 20px; width: 16px; height: parent.height;
+                text: "\u{00D7}";
+                color: del.has-hover ? #e5484d : Palette.t.faint;
+                font-size: 15px;
+                horizontal-alignment: center; vertical-alignment: center;
+                del := TouchArea { mouse-cursor: pointer; clicked => { WidgetState.note-delete(i); } }
+            }
+        }
+    }
+    if WidgetState.notes.length == 0: Text {
+        x: 12px; y: 32px;
+        text: "Nothing yet";
+        color: Palette.t.faint; font-size: 12px;
+    }
+
+    // add a note
+    Rectangle {
+        x: 8px; y: parent.height - 32px; width: parent.width - 16px; height: 24px;
+        border-radius: 6px;
+        background: Palette.t.cell;
+        border-width: 1px;
+        border-color: input.has-focus ? Palette.accent.with-alpha(0.6) : transparent;
+        FocusScope {
+            key-pressed(e) => {
+                if (e.text == Key.Escape) { root.escape(); return accept; }
+                return reject;
+            }
+            input := TextInput {
+                x: 8px; width: parent.width - 16px; height: parent.height;
+                single-line: true;
+                vertical-alignment: center;
+                color: Palette.t.text;
+                selection-background-color: Palette.accent.with-alpha(0.4);
+                font-size: 12px;
+                accepted => {
+                    if (self.text != "") { WidgetState.note-add(self.text); }
+                    self.text = "";
+                }
+            }
+        }
+        if input.text == "" && !input.has-focus: Text {
+            x: 8px; height: parent.height;
+            text: "+  Add a note";
+            color: Palette.t.faint; font-size: 12px;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// ---------- calendar ----------
+
+component CalendarCard inherits Card {
+    title: WidgetState.cal-title;
+    // month arrows, top right
+    HorizontalLayout {
+        x: parent.width - 80px; y: 4px; width: 72px; height: 22px;
+        spacing: 2px;
+        RoundButton { glyph: "prev-small"; size: 22px; clicked => { WidgetState.cal-prev(); } }
+        RoundButton { glyph: "dot"; size: 22px; opacity: WidgetState.cal-is-now ? 0.35 : 1; clicked => { WidgetState.cal-today(); } }
+        RoundButton { glyph: "next-small"; size: 22px; clicked => { WidgetState.cal-next(); } }
+    }
+    property <length> cw: (self.width - 16px) / 7;
+    property <length> ch: (self.height - 46px) / 6;
+    for d[i] in ["M", "T", "W", "T", "F", "S", "S"]: Text {
+        x: 8px + i * root.cw; y: 26px; width: root.cw; height: 14px;
+        text: d;
+        color: i >= 5 ? Palette.accent.with-alpha(0.8) : Palette.t.faint;
+        font-size: 9px; font-weight: 700;
+        horizontal-alignment: center;
+    }
+    for c[i] in WidgetState.cal-days: Rectangle {
+        x: 8px + mod(i, 7) * root.cw; y: 41px + floor(i / 7) * root.ch;
+        width: root.cw; height: root.ch;
+        if c.today: Rectangle {
+            width: min(parent.width, parent.height) - 1px; height: self.width;
+            border-radius: self.width / 2;
+            background: Palette.accent;
+        }
+        Text {
+            text: c.day;
+            color: c.today ? #111216 : c.this-month ? Palette.t.text : Palette.t.faint.with-alpha(0.35);
+            font-size: 10px;
+            font-weight: c.today ? 700 : 400;
+            horizontal-alignment: center; vertical-alignment: center;
+        }
+    }
+}
+
+// ---------- music ----------
+
+// A record that spins while music plays, with the album art as its label
+component Vinyl inherits Rectangle {
+    in property <bool> spinning;
+    in property <image> art;
+    in property <bool> has-art;
+    property <angle> turn: root.spinning ? mod(animation-tick() / 1ms, 4000) / 4000 * 360deg : 0deg;
+
+    border-radius: self.width / 2;
+    background: #111114;
+    drop-shadow-blur: 8px; drop-shadow-color: #00000060;
+
+    // grooves
+    for f in [0.92, 0.82, 0.72, 0.62]: Rectangle {
+        width: parent.width * f; height: self.width;
+        border-radius: self.width / 2;
+        border-width: 1px; border-color: #ffffff12;
+    }
+    // light catching the grooves (turns with the record)
+    Path {
+        width: parent.width; height: parent.height;
+        viewbox-width: 100; viewbox-height: 100;
+        commands: "M 50 6 A 44 44 0 0 1 81 19 L 50 50 Z M 50 94 A 44 44 0 0 1 19 81 L 50 50 Z";
+        fill: #ffffff10;
+        transform-rotation: root.turn;
+    }
+    // label: the album art, or the accent colour
+    Rectangle {
+        width: parent.width * 0.42; height: self.width;
+        border-radius: self.width / 2;
+        background: Palette.accent;
+        clip: true;
+        transform-rotation: root.turn;
+        if root.has-art: Image {
+            width: parent.width; height: parent.height;
+            source: root.art;
+            image-fit: cover;
+        }
+    }
+    // spindle hole
+    Rectangle { width: 5px; height: 5px; border-radius: 2.5px; background: #111114; }
+}
+
+component MusicCard inherits Card {
+    title: "NOW PLAYING";
+    open := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { WidgetState.music-open(); }
+    }
+    property <length> disc: min(self.height - 46px, self.width * 0.38);
+    Vinyl {
+        x: 12px; y: 30px + (root.height - 40px - root.disc) / 2 - 8px; width: root.disc; height: root.disc;
+        spinning: WidgetState.music-playing;
+        art: WidgetState.music-art;
+        has-art: WidgetState.music-has-art;
+    }
+    VerticalLayout {
+        x: root.disc + 24px; y: 30px; width: parent.width - root.disc - 34px; height: 46px;
+        spacing: 2px;
+        Text {
+            text: WidgetState.music-on ? WidgetState.music-title : "Nothing playing";
+            color: Palette.t.text; font-size: 13px; font-weight: 600;
+            overflow: elide;
+        }
+        Text {
+            text: WidgetState.music-on ? WidgetState.music-artist : "Play something and it shows up here";
+            color: Palette.t.faint; font-size: 11px;
+            overflow: elide;
+            wrap: WidgetState.music-on ? no-wrap : word-wrap;
+        }
+    }
+    if WidgetState.music-on: HorizontalLayout {
+        x: root.disc + 20px; y: parent.height - 46px; width: parent.width - root.disc - 30px; height: 34px;
+        spacing: 4px;
+        alignment: start;
+        RoundButton { glyph: "prev"; size: 32px; clicked => { WidgetState.music-prev(); } }
+        RoundButton {
+            glyph: WidgetState.music-playing ? "pause" : "play";
+            size: 34px; filled: true;
+            clicked => { WidgetState.music-toggle(); }
+        }
+        RoundButton { glyph: "next"; size: 32px; clicked => { WidgetState.music-next(); } }
+    }
+}
+
+// ---------- timer ----------
+
+component TimerCard inherits Card {
+    title: "TIMER";
+    Text {
+        x: 12px; y: 26px; height: 48px;
+        text: WidgetState.timer-done ? "Done!" : WidgetState.timer-text;
+        color: WidgetState.timer-done ? Palette.accent : Palette.t.text;
+        font-size: 34px; font-weight: 300;
+        vertical-alignment: center;
+    }
+    // progress
+    Rectangle {
+        x: 12px; y: 78px; width: parent.width - 24px; height: 4px;
+        border-radius: 2px;
+        background: Palette.t.pill;
+        Rectangle {
+            x: 0; width: parent.width * clamp(WidgetState.timer-progress, 0, 1); height: parent.height;
+            border-radius: 2px;
+            background: Palette.accent;
+            animate width { duration: 300ms; }
+        }
+    }
+    HorizontalLayout {
+        x: parent.width - 86px; y: 32px; width: 76px; height: 36px;
+        spacing: 6px;
+        RoundButton {
+            glyph: WidgetState.timer-running ? "pause" : "play";
+            size: 36px; filled: true;
+            clicked => { WidgetState.timer-toggle(); }
+        }
+        RoundButton { glyph: "reset"; size: 32px; clicked => { WidgetState.timer-reset(); } }
+    }
+    HorizontalLayout {
+        x: 12px; y: parent.height - 40px; width: parent.width - 24px; height: 26px;
+        spacing: 6px;
+        for m in [5, 15, 25, 45]: Chip {
+            horizontal-stretch: 1;
+            min-width: 0;
+            text: m + "m";
+            on: WidgetState.timer-minutes == m && !WidgetState.timer-started;
+            font-size: 11px;
+            clicked => { WidgetState.timer-preset(m); }
+        }
+    }
+}
+
+// ---------- weather ----------
+
+component Cloud inherits Rectangle {
+    in property <color> tint: #dfe3ea;
+    Rectangle { x: 0; y: parent.height * 0.45; width: parent.width; height: parent.height * 0.55;
+                border-radius: self.height / 2; background: root.tint; }
+    Rectangle { x: parent.width * 0.14; y: parent.height * 0.2; width: parent.width * 0.42; height: self.width;
+                border-radius: self.width / 2; background: root.tint; }
+    Rectangle { x: parent.width * 0.4; y: 0; width: parent.width * 0.5; height: self.width;
+                border-radius: self.width / 2; background: root.tint; }
+}
+
+component Sun inherits Rectangle {
+    Path {
+        width: parent.width; height: parent.height;
+        viewbox-width: 100; viewbox-height: 100;
+        commands: "M 50 2 L 50 18 M 50 82 L 50 98 M 2 50 L 18 50 M 82 50 L 98 50 M 16 16 L 27 27 M 73 73 L 84 84 M 84 16 L 73 27 M 27 73 L 16 84";
+        stroke: #fbbf24; stroke-width: parent.width * 0.08;
+        fill: transparent;
+    }
+    Rectangle {
+        width: parent.width * 0.62; height: self.width;
+        border-radius: self.width / 2;
+        background: #fbbf24;
+        border-width: parent.width * 0.07; border-color: Palette.t.panel;
+    }
+}
+
+// 0 sun, 1 moon, 2 sun+cloud, 3 cloud, 4 fog, 5 rain, 6 snow, 7 storm
+component WeatherIcon inherits Rectangle {
+    in property <int> kind;
+    width: 56px; height: 56px;
+    property <color> cloud-tint: Palette.t.dark ? #d5dae3 : #9aa3b2;
+
+    if kind == 0: Sun { width: 52px; height: 52px; }
+    if kind == 1: Rectangle {
+        width: 36px; height: 36px; border-radius: 18px; background: #e8e3c8;
+        Rectangle { x: 11px; y: -6px; width: 34px; height: 34px; border-radius: 17px; background: Palette.t.panel; }
+    }
+    if kind == 2: Rectangle {
+        Sun { x: 16px; y: 2px; width: 38px; height: 38px; }
+        Cloud { x: 0; y: 22px; width: 44px; height: 28px; tint: root.cloud-tint; }
+    }
+    if kind == 3 || kind >= 5: Cloud {
+        x: 4px; y: 6px; width: 48px; height: 30px;
+        tint: root.kind == 7 ? #8b93a3 : root.cloud-tint;
+    }
+    if kind == 4: VerticalLayout {
+        x: 4px; y: 12px; width: 48px; spacing: 6px;
+        for i in 3: Rectangle { height: 4px; border-radius: 2px; background: root.cloud-tint;
+                                width: (i == 1 ? 0.75 : 1) * 48px; }
+    }
+    if kind == 5: Path {
+        x: 12px; y: 39px; width: 34px; height: 13px;
+        viewbox-width: 34; viewbox-height: 13;
+        commands: "M 6 1 L 3 12 M 17 1 L 14 12 M 28 1 L 25 12";
+        stroke: #60a5fa; stroke-width: 3px;
+        fill: transparent;
+    }
+    if kind == 6: Rectangle {
+        for i in 3: Rectangle {
+            x: 13px + i * 12px; y: 42px + mod(i, 2) * 5px; width: 6px; height: 6px; border-radius: 3px;
+            background: #e5e7eb;
+        }
+    }
+    if kind == 7: Path {
+        x: 20px; y: 32px; width: 16px; height: 22px;
+        viewbox-width: 8; viewbox-height: 11;
+        commands: "M 5 0 L 0 6 L 3.5 6 L 2.5 11 L 8 4.5 L 4.5 4.5 Z";
+        fill: #fbbf24;
+    }
+}
+
+component WeatherCard inherits Card {
+    title: "WEATHER";
+    if WidgetState.weather-ok: Rectangle {
+        WeatherIcon { x: 12px; y: 34px; kind: WidgetState.weather-icon; }
+        Text {
+            x: 78px; y: 28px; height: 44px;
+            text: WidgetState.weather-temp;
+            color: Palette.t.text; font-size: 34px; font-weight: 300;
+            vertical-alignment: center;
+        }
+        Text {
+            x: 80px; y: 72px; width: parent.width - 90px;
+            text: WidgetState.weather-desc;
+            color: Palette.t.text; font-size: 12px;
+            overflow: elide;
+        }
+        Text {
+            x: 12px; y: parent.height - 30px; width: parent.width - 60px; height: 18px;
+            text: WidgetState.weather-place + (WidgetState.weather-range == "" ? "" : "  \u{00B7}  " + WidgetState.weather-range);
+            color: Palette.t.faint; font-size: 11px;
+            overflow: elide; vertical-alignment: center;
+        }
+    }
+    if !WidgetState.weather-ok: Text {
+        x: 12px; y: 30px; width: parent.width - 24px; height: parent.height - 60px;
+        text: WidgetState.weather-message;
+        color: Palette.t.faint; font-size: 12px;
+        wrap: word-wrap; vertical-alignment: center;
+    }
+    RoundButton {
+        x: parent.width - 36px; y: parent.height - 36px;
+        glyph: "refresh"; size: 26px;
+        clicked => { WidgetState.weather-refresh(); }
+    }
+}
+
+// ---------- one slot ----------
+
+export component WidgetCard inherits Rectangle {
+    in property <int> kind;   // 0 notes, 1 music, 2 timer, 3 weather, 4 calendar (see src/layout.rs)
+    callback escape();
+    if root.kind == 0: NotesCard { width: parent.width; height: parent.height; escape => { root.escape(); } }
+    if root.kind == 1: MusicCard { width: parent.width; height: parent.height; }
+    if root.kind == 2: TimerCard { width: parent.width; height: parent.height; }
+    if root.kind == 3: WeatherCard { width: parent.width; height: parent.height; }
+    if root.kind == 4: CalendarCard { width: parent.width; height: parent.height; }
+}

@@ -1,0 +1,143 @@
+// Shared by every window: theme colours, the × button, small icons.
+
+export struct Theme {
+    panel: color, tile: color, tile-hover: color, tile-current: color, border: color,
+    text: color, faint: color, pill: color, cell: color, cell-hover: color, dark: bool,
+}
+
+export global Palette {
+    in-out property <Theme> t: {
+        panel: #1b1b1f, tile: #ffffff08, tile-hover: #ffffff0f, tile-current: #ffffff12, border: #ffffff16,
+        text: #e6e6ea, faint: #ffffff50, pill: #ffffff20, cell: #ffffff0b, cell-hover: #ffffff1e, dark: true,
+    };
+    in-out property <color> accent: #8ab4f8;
+}
+
+// Small round × button
+export component CloseDot inherits Rectangle {
+    callback clicked();
+    in property <length> size: 18px;
+    width: size; height: size;
+    border-radius: size / 2;
+    background: dot.has-hover ? #e5484d : (Palette.t.dark ? #3a3a42 : #6b6b75);
+    border-width: 1px; border-color: #ffffff30;
+    animate background { duration: 100ms; }
+    Text { text: "\u{00D7}"; color: white; font-size: root.size * 0.72; font-weight: 700;
+           horizontal-alignment: center; vertical-alignment: center; }
+    dot := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+}
+
+
+// A small pill-shaped button
+export component Chip inherits Rectangle {
+    in property <string> text;
+    in property <bool> on: false;
+    in property <length> font-size: 12px;
+    callback clicked();
+    height: 26px;
+    min-width: label.preferred-width + 20px;
+    border-radius: 13px;
+    background: root.on ? Palette.accent : (ta.has-hover ? Palette.t.cell-hover : Palette.t.cell);
+    border-width: 1px;
+    border-color: root.on ? Palette.accent : Palette.t.border;
+    animate background { duration: 100ms; }
+    label := Text {
+        text: root.text;
+        color: root.on ? #111216 : Palette.t.text;
+        font-size: root.font-size;
+        horizontal-alignment: center; vertical-alignment: center;
+    }
+    ta := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+}
+
+// Simple drawn icons (so they look the same on every PC)
+export component Glyph inherits Rectangle {
+    // "play", "pause", "prev", "next", "reset", "refresh", "edit"
+    in property <string> name;
+    in property <color> tint: Palette.t.text;
+    width: 14px; height: 14px;
+    if root.name == "play": Path {
+        width: 100%; height: 100%;
+        viewbox-width: 12; viewbox-height: 12;
+        commands: "M 2 0.5 L 11.5 6 L 2 11.5 Z";
+        fill: root.tint;
+    }
+    if root.name == "pause": Path {
+        width: 100%; height: 100%;
+        viewbox-width: 12; viewbox-height: 12;
+        commands: "M 2 1 L 5 1 L 5 11 L 2 11 Z M 7 1 L 10 1 L 10 11 L 7 11 Z";
+        fill: root.tint;
+    }
+    if root.name == "next": Path {
+        width: 100%; height: 100%;
+        viewbox-width: 12; viewbox-height: 12;
+        commands: "M 1 1 L 8.5 6 L 1 11 Z M 9 1 L 11 1 L 11 11 L 9 11 Z";
+        fill: root.tint;
+    }
+    if root.name == "prev": Path {
+        width: 100%; height: 100%;
+        viewbox-width: 12; viewbox-height: 12;
+        commands: "M 11 1 L 3.5 6 L 11 11 Z M 1 1 L 3 1 L 3 11 L 1 11 Z";
+        fill: root.tint;
+    }
+    if root.name == "reset" || root.name == "refresh": Path {
+        width: 100%; height: 100%;
+        viewbox-width: 12; viewbox-height: 12;
+        commands: "M 10.2 4 A 4.6 4.6 0 1 0 10.6 7.4 M 10.6 1.2 L 10.4 4.2 L 7.4 4";
+        stroke: root.tint; stroke-width: 1.5px; fill: transparent;
+    }
+    if root.name == "prev-small": Path {
+        width: 100%; height: 100%;
+        viewbox-width: 12; viewbox-height: 12;
+        commands: "M 7.5 2 L 3.5 6 L 7.5 10";
+        stroke: root.tint; stroke-width: 1.6px; fill: transparent;
+    }
+    if root.name == "next-small": Path {
+        width: 100%; height: 100%;
+        viewbox-width: 12; viewbox-height: 12;
+        commands: "M 4.5 2 L 8.5 6 L 4.5 10";
+        stroke: root.tint; stroke-width: 1.6px; fill: transparent;
+    }
+    if root.name == "dot": Rectangle {
+        width: 40%; height: 40%; border-radius: self.width / 2;
+        background: root.tint;
+    }
+    if root.name == "search": Path {
+        width: 100%; height: 100%;
+        viewbox-width: 12; viewbox-height: 12;
+        commands: "M 5 1 A 4 4 0 1 1 4.99 1 Z M 7.9 7.9 L 11 11";
+        stroke: root.tint; stroke-width: 1.6px; fill: transparent;
+    }
+    if root.name == "lock": Path {
+        width: 100%; height: 100%;
+        viewbox-width: 12; viewbox-height: 12;
+        commands: "M 2 5.5 L 10 5.5 L 10 11.5 L 2 11.5 Z M 3.8 5.5 L 3.8 3.6 A 2.2 2.2 0 0 1 8.2 3.6 L 8.2 5.5";
+        stroke: root.tint; stroke-width: 1.3px; fill: transparent;
+    }
+    if root.name == "edit": Path {
+        width: 100%; height: 100%;
+        viewbox-width: 12; viewbox-height: 12;
+        commands: "M 1.5 10.5 L 2.2 7.8 L 8.6 1.4 L 10.6 3.4 L 4.2 9.8 Z";
+        stroke: root.tint; stroke-width: 1.3px; fill: transparent;
+    }
+}
+
+// Round icon button
+export component RoundButton inherits Rectangle {
+    in property <string> glyph;
+    in property <length> size: 30px;
+    in property <bool> filled: false;
+    out property <bool> has-hover: ta.has-hover;
+    callback clicked();
+    width: size; height: size;
+    border-radius: size / 2;
+    background: root.filled ? (ta.has-hover ? Palette.accent.brighter(0.15) : Palette.accent)
+                            : (ta.has-hover ? Palette.t.cell-hover : transparent);
+    animate background { duration: 100ms; }
+    Glyph {
+        name: root.glyph;
+        width: root.size * 0.42; height: root.size * 0.42;
+        tint: root.filled ? #111216 : Palette.t.text;
+    }
+    ta := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+}

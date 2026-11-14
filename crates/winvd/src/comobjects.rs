@@ -797,6 +797,18 @@ impl ComObjects {
         Ok(())
     }
 
+    /// Move a desktop to another position (0 = first). Added for WinOverview.
+    #[apply(retry_function)]
+    pub fn move_desktop(&self, desktop: &DesktopInternal, index: u32) -> Result<()> {
+        let desktop = self.get_idesktop(desktop)?;
+        unsafe {
+            self.get_manager_internal()?
+                .move_desktop(ComIn::new(&desktop), index)
+                .as_result()?
+        }
+        Ok(())
+    }
+
     #[apply(retry_function)]
     pub fn create_desktop(&self) -> Result<DesktopInternal> {
         let mut desktop = None;

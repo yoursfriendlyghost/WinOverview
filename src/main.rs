@@ -12,11 +12,14 @@
 #![windows_subsystem = "windows"]
 
 mod config;
+mod free;
 mod layout;
 mod overview;
 mod snap;
 mod themes;
 mod thumbs;
+mod widget_ui;
+mod widgets;
 mod win;
 
 slint::include_modules!();
@@ -27,7 +30,7 @@ use std::time::Instant;
 
 use global_hotkey::hotkey::HotKey;
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
-use slint::{ComponentHandle, ModelRc, Timer, VecModel};
+use slint::{ComponentHandle, Model, ModelRc, Timer, VecModel};
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
@@ -39,6 +42,7 @@ use win::{IconCache, WinInfo};
 pub struct Tray {
     icon: TrayIcon,
     open: MenuItem,
+    edit: MenuItem,
     startup: CheckMenuItem,
     settings: MenuItem,
     restart: MenuItem,
@@ -88,9 +92,38 @@ pub struct App {
     pub picker_watch: Timer,
     pub picker_opened: Instant,
     pub snap: Option<SnapRequest>,
+
+    // edit mode
+    pub editing: bool,
+    /// Moving a window in edit mode: which one (None = the panel, Some(i) = capsule i),
+    /// where the mouse started, where the window started
+    pub moving: Option<(Option<usize>, (i32, i32), (i32, i32))>,
+    /// Free layout: the widgets' own windows
+    pub widget_windows: Vec<free::Capsule>,
+    /// The panel's rectangle on screen (x, y, width, height) when last placed
+    pub panel_rect: (i32, i32, i32, i32),
+
+    // widgets
+    pub music: Option<widgets::Music>,
+    pub track: Option<widgets::Track>,
+    pub timer: widget_ui::TimerState,
+    pub weather_at: Option<Instant>,
+    pub weather_busy: bool,
+    /// The notes checklist (shared by every window that shows it)
+    pub notes: Rc<VecModel<NoteItem>>,
+    /// The month the calendar shows (year, month 1-12)
+    pub cal_month: (i32, u32),
 }
 
 pub type Shared = Rc<RefCell<App>>;
+
+impl App {
+    /// The panel's last known rectangle as (left, top, right, bottom).
+    pub fn panel_rect_ltrb(&self) -> (i32, i32, i32, i32) {
+        let (x, y, w, h) = self.panel_rect;
+        (x, y, x + w, y + h)
+    }
+}
 
 thread_local! {
     static APP: RefCell<Option<Shared>> = const { RefCell::new(None) };
@@ -139,7 +172,19 @@ fn main() {
         tray: None,
         windows: Vec::new(),
         icons: IconCache::default(),
-        layout: layout::compute(&[0], 5, layout::Mode::Icons, 4000.0),
+        layout: layout::compute(&layout::Options {
+            apps: &[0],
+            per_row: 5,
+            mode: layout::Mode::Icons,
+            orient: layout::Orient::Horizontal,
+            widgets: &[],
+            widgets_first: false,
+            max_w: 4000.0,
+            max_h: 4000.0,
+            top: 0.0,
+            widget_w: 248.0,
+            widget_h: 156.0,
+        }),
         current: 0,
         query: String::new(),
         selected: None,
@@ -159,10 +204,22 @@ fn main() {
         picker_watch: Timer::default(),
         picker_opened: Instant::now(),
         snap: None,
+        editing: false,
+        moving: None,
+        widget_windows: Vec::new(),
+        panel_rect: (0, 0, 0, 0),
+        music: None,
+        track: None,
+        timer: widget_ui::TimerState::default(),
+        weather_at: None,
+        weather_busy: false,
+        notes: Rc::new(VecModel::default()),
+        cal_month: (2026, 1),
     }));
     APP.with(|a| *a.borrow_mut() = Some(app.clone()));
 
     overview::wire(&app);
+    widget_ui::wire(&app);
     let hotkey_text = app.borrow().config.hotkey.clone();
     if let Err(e) = register_hotkey(&app, &hotkey_text) {
         win::message_box(&format!("{e}\nUsing Alt+` instead. You can change it in Settings (tray icon)."));
@@ -226,6 +283,7 @@ fn create_tray(app: &Shared) {
     let open = MenuItem::new("Open", true, None);
     let startup = CheckMenuItem::new("Start with Windows", true, win::startup_enabled(), None);
     let settings = MenuItem::new("Settings\u{2026}", true, None);
+    let edit = MenuItem::new("Edit layout\u{2026}", true, None);
     let restart_item = MenuItem::new("Restart", true, None);
     let quit_item = MenuItem::new("Quit", true, None);
     let menu = Menu::new();
@@ -233,6 +291,7 @@ fn create_tray(app: &Shared) {
         &open,
         &PredefinedMenuItem::separator(),
         &startup,
+        &edit,
         &settings,
         &PredefinedMenuItem::separator(),
         &restart_item,
@@ -248,14 +307,14 @@ fn create_tray(app: &Shared) {
         builder = builder.with_icon(icon);
     }
     let Ok(tray) = builder.build() else { return };
-    app.borrow_mut().tray = Some(Tray { icon: tray, open, startup, settings, restart: restart_item, quit: quit_item });
+    app.borrow_mut().tray = Some(Tray { icon: tray, open, edit, startup, settings, restart: restart_item, quit: quit_item });
 
     MenuEvent::set_event_handler(Some(|e: MenuEvent| {
         post(move |app| {
             let which = {
                 let a = app.borrow();
                 let Some(t) = &a.tray else { return };
-                [t.open.id(), t.startup.id(), t.settings.id(), t.restart.id(), t.quit.id()]
+                [t.open.id(), t.startup.id(), t.settings.id(), t.restart.id(), t.quit.id(), t.edit.id()]
                     .iter()
                     .position(|id| **id == e.id)
             };
@@ -270,6 +329,7 @@ fn create_tray(app: &Shared) {
                 Some(2) => open_settings(app),
                 Some(3) => restart(),
                 Some(4) => quit(),
+                Some(5) => overview::edit_start(app),
                 _ => {}
             }
         });
@@ -324,6 +384,34 @@ fn open_settings(app: &Shared) {
                 }
             });
             s.set_themes(ModelRc::new(VecModel::from(themes::choices())));
+            let s2 = s.as_weak();
+            s.on_privacy_toggle(move |i, on| {
+                if let Some(s) = s2.upgrade() {
+                    let model = s.get_privacy_apps();
+                    if let Some(mut row) = model.row_data(i as usize) {
+                        row.on = on;
+                        model.set_row_data(i as usize, row);
+                    }
+                }
+            });
+            let w1 = Rc::downgrade(app);
+            s.on_edit_on_screen(move || {
+                if let Some(app) = w1.upgrade() {
+                    if let Some(s) = &app.borrow().settings {
+                        let _ = s.hide();
+                    }
+                    overview::edit_start(&app);
+                }
+            });
+            let w1 = Rc::downgrade(app);
+            s.on_reset_position(move || {
+                if let Some(app) = w1.upgrade() {
+                    overview::reset_position(&app);
+                    if let Some(s) = &app.borrow().settings {
+                        s.set_custom_position(false);
+                    }
+                }
+            });
             app.borrow_mut().settings = Some(s.clone_strong());
             s
         }
@@ -341,9 +429,39 @@ fn open_settings(app: &Shared) {
         s.set_startup(win::startup_enabled());
         s.set_accent(c.accent());
         s.set_theme(a.theme.name.into());
+        s.set_free_layout(c.free_layout);
+        s.set_vertical(c.vertical());
+        s.set_widgets_first(c.widgets_first);
+        s.set_widget_size(c.widget_size.to_ascii_lowercase().as_str().into());
+        s.set_privacy(c.privacy_mode);
+        s.set_privacy_apps(ModelRc::new(VecModel::from(privacy_list(&a))));
+        s.set_flags(overview::flags(c));
+        s.set_city(c.weather_city.as_str().into());
+        s.set_fahrenheit(c.weather_fahrenheit);
+        s.set_custom_position(c.panel_x >= 0.0 || c.widget_groups.iter().any(|g| g.x >= 0.0));
         s.set_status("".into());
     }
     let _ = s.show();
+}
+
+/// Apps to choose from for privacy mode: the ones open now, plus any already chosen.
+fn privacy_list(a: &App) -> Vec<PrivacyApp> {
+    let mut list: Vec<PrivacyApp> = Vec::new();
+    let mut icons = IconCache::default();
+    for w in win::list_windows(&[a.hwnd, a.picker_hwnd], win::current_desktop()) {
+        let name = win::exe_name(&w.exe).to_lowercase();
+        if name.is_empty() || name == "winoverview" || list.iter().any(|p| p.name == name) {
+            continue;
+        }
+        list.push(PrivacyApp { on: a.config.private_apps.contains(&name), icon: icons.get(&w), name: name.into() });
+    }
+    for name in &a.config.private_apps {
+        if !list.iter().any(|p| p.name == name.as_str()) {
+            list.push(PrivacyApp { name: name.as_str().into(), icon: Default::default(), on: true });
+        }
+    }
+    list.sort_by(|x, y| y.on.cmp(&x.on).then(x.name.cmp(&y.name)));
+    list
 }
 
 fn save_settings(app: &Shared) {
@@ -364,6 +482,31 @@ fn save_settings(app: &Shared) {
         a.config.desktops_per_row = s.get_per_row().clamp(1, 10) as u32;
         a.config.top_margin_percent = s.get_top_margin().clamp(0, 40) as f64;
         a.config.open_on_mouse_monitor = s.get_mouse_monitor();
+        a.config.free_layout = s.get_free_layout();
+        a.config.orientation = if s.get_vertical() { "vertical" } else { "horizontal" }.into();
+        a.config.widgets_first = s.get_widgets_first();
+        a.config.widget_size = s.get_widget_size().to_string();
+        a.config.privacy_mode = s.get_privacy();
+        let privacy_apps = s.get_privacy_apps();
+        for i in 0..privacy_apps.row_count() {
+            if let Some(p) = privacy_apps.row_data(i) {
+                a.config.set_private(&p.name, p.on);
+            }
+        }
+        let f = s.get_flags();
+        use layout::Widget;
+        for (w, on) in [(Widget::Notes, f.notes), (Widget::Music, f.music), (Widget::Timer, f.timer), (Widget::Weather, f.weather), (Widget::Calendar, f.calendar)] {
+            a.config.set_widget(w, on);
+        }
+        let city = s.get_city().trim().to_string();
+        let unit = s.get_fahrenheit();
+        if city != a.config.weather_city || unit != a.config.weather_fahrenheit {
+            a.config.weather_city = city;
+            a.config.weather_fahrenheit = unit;
+            a.config.weather_latitude = None; // look the city up again
+            a.config.weather_longitude = None;
+            a.weather_at = None;
+        }
         a.config.accent_color = config::to_hex(s.get_accent());
         a.config.theme = s.get_theme().to_string();
         if let Some(t) = &a.tray {
@@ -372,6 +515,7 @@ fn save_settings(app: &Shared) {
         a.config.save()
     };
     apply_look(app);
+    widget_ui::settings_changed(app);
     win::set_startup(s.get_startup());
     if let Some(t) = &app.borrow().tray {
         t.startup.set_checked(win::startup_enabled());
@@ -406,5 +550,6 @@ fn apply_look(app: &Shared) {
             win::set_border(h, dark, border);
         }
     }
+    free::apply_look(&a);
     a.popup = None; // made again with the new colours when next needed
 }
