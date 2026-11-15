@@ -21,8 +21,11 @@ const ICON_CELL: f32 = 46.0;
 const SLOT_W: f32 = 184.0;
 const SLOT_H: f32 = 128.0;
 const SLOT_GAP: f32 = 8.0;
-const MAX_COLS: usize = 3;
-const MAX_ROWS: usize = 3;
+/// Up to 6 × 6 = 36 previews per desktop; past that the last slot shows "+N".
+const MAX_COLS: usize = 6;
+/// Up to this many columns the previews keep their full size; with more they shrink so the
+/// tile stays about as wide as a 3-column one.
+const FULL_SIZE_COLS: usize = 3;
 /// Title strip at the top of each preview cell (the live preview goes below it).
 pub const PREVIEW_HEADER: f32 = 22.0;
 
@@ -164,17 +167,20 @@ fn tile(n: usize, mode: Mode, scale: f32, icon_cols: usize) -> (f32, f32, Vec<Re
             (w, h, cells, 0, Rect::default())
         }
         Mode::Previews => {
-            let max_slots = MAX_COLS * MAX_ROWS;
+            let max_slots = MAX_COLS * MAX_COLS;
             let shown = if n > max_slots { max_slots - 1 } else { n };
             let more = n - shown;
             let slots = (shown + usize::from(more > 0)).max(1);
+            // Smallest square-ish grid that fits: 1, 2×2, 3×3, 4×4, 5×5, 6×6
             let cols = match slots {
                 1 => 1,
                 2..=4 => 2,
-                _ => 3,
+                _ => ((slots as f32).sqrt().ceil() as usize).clamp(3, MAX_COLS),
             };
             let rows = slots.div_ceil(cols);
-            let (sw, sh, g) = (SLOT_W * scale, SLOT_H * scale, SLOT_GAP);
+            let shrink = if cols > FULL_SIZE_COLS { FULL_SIZE_COLS as f32 / cols as f32 } else { 1.0 };
+            let g = if cols > 4 { SLOT_GAP * 0.75 } else { SLOT_GAP };
+            let (sw, sh) = (SLOT_W * scale * shrink, (SLOT_H * scale * shrink).max(PREVIEW_HEADER + 34.0));
             let at = |i: usize| Rect {
                 x: INSET + (i % cols) as f32 * (sw + g),
                 y: HEAD + (i / cols) as f32 * (sh + g),

@@ -14,6 +14,7 @@ export struct AppItem {
     hit: bool,         // matches the search (always true when not searching)
     live: bool,        // a live preview is drawn over this cell (previews view)
     private: bool,     // privacy mode: no preview, no window title
+    count: int,        // windows in this cell (more than 1 = a stack of the same app)
     x: length, y: length, w: length, h: length,   // inside the tile
 }
 
@@ -57,6 +58,7 @@ export component Overview inherits Window {
     in property <int> selected-id: 0;
     in property <bool> shown: false;
     in property <string> query;
+    in property <bool> query-all: false;     // Ctrl+A: the whole search text is selected
     in property <int> matches: 0;           // apps matching the search
     in property <bool> can-close-desk: true;
 
@@ -187,6 +189,18 @@ export component Overview inherits Window {
                     opacity: (root.dragging && root.drag-id == a.id) ? 0.25 : (a.hit ? 1 : 0.22);
                     animate background, opacity { duration: 110ms; }
 
+                    // a stack: the edges of the cards underneath peek out at the top
+                    if a.count > 2: Rectangle {
+                        x: 12px; y: -6px; width: parent.width - 24px; height: 3px;
+                        border-top-left-radius: 3px; border-top-right-radius: 3px;
+                        background: Palette.t.pill;
+                    }
+                    if a.count > 1: Rectangle {
+                        x: 6px; y: -3px; width: parent.width - 12px; height: 3px;
+                        border-top-left-radius: 3px; border-top-right-radius: 3px;
+                        background: Palette.t.cell-hover;
+                    }
+
                     cell := TouchArea {
                         property <bool> did-drag: false;
                         mouse-cursor: pointer;
@@ -231,7 +245,7 @@ export component Overview inherits Window {
                             source: a.icon;
                             image-rendering: smooth;
                         }
-                        if !root.previews && cell.has-hover && !root.dragging: CloseDot {
+                        if !root.previews && cell.has-hover && !root.dragging && a.count <= 1: CloseDot {
                             x: parent.width - 13px; y: -5px;
                             clicked => { root.app-close(a.id); }
                         }
@@ -255,6 +269,20 @@ export component Overview inherits Window {
                             source: a.icon;
                             image-rendering: smooth;
                         }
+                        // how many windows are in the stack
+                        if a.count > 1: Rectangle {
+                            x: root.previews ? parent.width - self.width - 6px : parent.width - self.width + 5px;
+                            y: root.previews ? 3px : parent.height - 11px;
+                            height: 16px; width: max(16px, badge.preferred-width + 10px);
+                            border-radius: 8px;
+                            background: Palette.accent;
+                            badge := Text {
+                                text: a.count;
+                                color: #111216; font-size: 10px; font-weight: 700;
+                                horizontal-alignment: center; vertical-alignment: center;
+                            }
+                        }
+
                         // privacy mode: a small lock instead of the preview
                         if a.private && !root.previews: Rectangle {
                             x: parent.width - 17px; y: parent.height - 17px;
@@ -267,7 +295,7 @@ export component Overview inherits Window {
                             width: 18px; height: 18px;
                             Glyph { name: "lock"; width: 12px; height: 12px; tint: Palette.t.faint; }
                         }
-                        if root.previews && cell.has-hover && !root.dragging: CloseDot {
+                        if root.previews && cell.has-hover && !root.dragging && a.count <= 1: CloseDot {
                             size: 16px;
                             x: parent.width - 19px; y: 3px;
                             clicked => { root.app-close(a.id); }
@@ -339,6 +367,12 @@ export component Overview inherits Window {
             background: Palette.accent;
             drop-shadow-blur: 10px; drop-shadow-color: Palette.accent.with-alpha(0.35);
             Glyph { x: 14px; name: "search"; width: 14px; height: 14px; tint: #111216; }
+            if root.query-all: Rectangle {
+                x: 35px; y: 6px; height: parent.height - 12px;
+                width: min(q.preferred-width, parent.width - 90px) + 6px;
+                border-radius: 4px;
+                background: #111216.with-alpha(0.28);
+            }
             q := Text {
                 x: 38px; width: parent.width - 90px; height: parent.height;
                 text: root.query;
@@ -492,6 +526,115 @@ export component WidgetWindow inherits Window {
 }
 
 // ================= Snap picker =================
+
+// One stack's windows (same app, same desktop), in their own window over the panel.
+// Cell positions come from src/stack.rs; live previews are drawn under each title strip by Windows.
+export component StackView inherits Window {
+    title: "WinOverview - stack";
+    no-frame: true;
+    always-on-top: true;
+    background: Palette.t.panel;
+    forward-focus: fs;
+    width: view-w;
+    height: view-h;
+
+    in property <Theme> theme: Palette.t;
+    in property <color> accent: Palette.accent;
+    changed theme => { Palette.t = self.theme; }
+    changed accent => { Palette.accent = self.accent; }
+
+    in property <length> view-w: 400px;
+    in property <length> view-h: 300px;
+    in property <image> app-icon;
+    in property <string> heading;
+    in property <[AppItem]> items;
+    in property <bool> shown;
+    in property <bool> thumbs-on;
+    in-out property <int> selected: 0;      // index of the highlighted window
+
+    callback pick(int);          // window handle
+    callback close-window(int);  // window handle
+    callback dismiss();
+    callback key(string) -> bool;
+
+    public function focus-keys() { fs.focus(); }
+
+    fs := FocusScope {
+        key-pressed(e) => {
+            if (e.text == Key.Escape) { root.dismiss(); return accept; }
+            if (root.key(e.text)) { return accept; }
+            return reject;
+        }
+    }
+
+    content := Rectangle {
+        opacity: root.shown ? 1 : 0;
+        animate opacity { duration: 130ms; easing: ease-out; }
+
+        // header: icon, "App · N windows", close
+        Image {
+            x: 16px; y: 14px; width: 18px; height: 18px;
+            source: root.app-icon;
+            image-rendering: smooth;
+        }
+        Text {
+            x: 42px; y: 12px; width: root.view-w - 90px; height: 22px;
+            text: root.heading;
+            color: Palette.t.text; font-size: 13px; font-weight: 600;
+            overflow: elide; vertical-alignment: center;
+        }
+        CloseDot {
+            x: root.view-w - 30px; y: 14px;
+            clicked => { root.dismiss(); }
+        }
+
+        for a[i] in root.items: Rectangle {
+            property <bool> sel: i == root.selected;
+            x: a.x; y: a.y; width: a.w; height: a.h;
+            border-radius: 9px;
+            background: self.sel ? Palette.accent.with-alpha(0.25)
+                      : cell.has-hover ? Palette.t.cell-hover : Palette.t.cell;
+            border-width: self.sel ? 2px : (cell.has-hover ? 1px : 0px);
+            border-color: self.sel ? Palette.accent : Palette.t.border;
+            animate background { duration: 110ms; }
+
+            cell := TouchArea {
+                mouse-cursor: pointer;
+                changed has-hover => { if (self.has-hover) { root.selected = i; } }
+                clicked => { root.pick(a.id); }
+
+                Image {
+                    x: 6px; y: 4px; width: 14px; height: 14px;
+                    source: a.icon;
+                    image-rendering: smooth;
+                }
+                Text {
+                    x: 25px; y: 2px; width: parent.width - 50px; height: 18px;
+                    text: a.title;
+                    color: Palette.t.text; font-size: 11px;
+                    overflow: elide; vertical-alignment: center;
+                }
+                if !(a.live && root.thumbs-on): Image {
+                    property <length> s: min(40px, parent.height - 34px);
+                    x: (parent.width - self.s) / 2; y: 22px + (parent.height - 22px - self.s) / 2;
+                    width: self.s; height: self.s;
+                    source: a.icon;
+                    image-rendering: smooth;
+                }
+                if a.private: Rectangle {
+                    x: (parent.width - 18px) / 2; y: parent.height - 26px;
+                    width: 18px; height: 18px;
+                    Glyph { name: "lock"; width: 12px; height: 12px; tint: Palette.t.faint; }
+                }
+                if cell.has-hover: CloseDot {
+                    size: 16px;
+                    x: parent.width - 19px; y: 3px;
+                    clicked => { root.close-window(a.id); }
+                }
+            }
+        }
+    }
+}
 
 export component SnapPicker inherits Window {
     title: "WinOverview - snap";

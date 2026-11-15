@@ -16,6 +16,7 @@ mod free;
 mod layout;
 mod overview;
 mod snap;
+mod stack;
 mod themes;
 mod thumbs;
 mod widget_ui;
@@ -67,10 +68,22 @@ pub struct App {
 
     // what's on screen
     pub windows: Vec<WinInfo>,
+    /// Same-app windows grouped per desktop (see overview::Stack)
+    pub stacks: Vec<Vec<overview::Stack>>,
+    /// The window that shows one stack's windows over the panel (src/stack.rs)
+    pub stack_view: Option<StackView>,
+    pub stack_hwnd: isize,
+    pub stack_thumbs: thumbs::Thumbs,
+    pub stack_watch: Timer,
+    pub stack_opened: Instant,
+    /// The stack that's open: (desktop, app) and its windows
+    pub stack_open: Option<(u32, String, Vec<WinInfo>)>,
     pub icons: IconCache,
     pub layout: Layout,
     pub current: u32,
     pub query: String,
+    /// Ctrl+A: the whole search text is selected (the next key replaces it)
+    pub query_all: bool,
     pub selected: Option<isize>,
     pub monitor: win::Monitor,
     /// The app you were using before opening the overview (the snap picker's partner)
@@ -171,6 +184,13 @@ fn main() {
         hotkey: None,
         tray: None,
         windows: Vec::new(),
+        stacks: Vec::new(),
+        stack_view: None,
+        stack_hwnd: 0,
+        stack_thumbs: thumbs::Thumbs::default(),
+        stack_watch: Timer::default(),
+        stack_opened: Instant::now(),
+        stack_open: None,
         icons: IconCache::default(),
         layout: layout::compute(&layout::Options {
             apps: &[0],
@@ -187,6 +207,7 @@ fn main() {
         }),
         current: 0,
         query: String::new(),
+        query_all: false,
         selected: None,
         monitor: win::monitor(false),
         previous: 0,
@@ -541,11 +562,15 @@ fn apply_look(app: &Shared) {
     a.ui.set_theme(ui_theme.clone());
     a.ui.set_accent(accent);
     if let Some(p) = &a.picker {
-        p.set_theme(ui_theme);
+        p.set_theme(ui_theme.clone());
         p.set_accent(accent);
     }
+    if let Some(v) = &a.stack_view {
+        v.set_theme(ui_theme);
+        v.set_accent(accent);
+    }
     let (dark, border) = (a.theme.dark, a.theme.border_bgr());
-    for h in [a.hwnd, a.picker_hwnd] {
+    for h in [a.hwnd, a.picker_hwnd, a.stack_hwnd] {
         if h != 0 {
             win::set_border(h, dark, border);
         }

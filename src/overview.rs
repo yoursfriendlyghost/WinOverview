@@ -34,6 +34,7 @@ pub fn show(app: &Shared) {
             a.previous = fg;
         }
         a.query.clear();
+        a.query_all = false;
         a.selected = None;
         a.visible = true;
         a.shown_at = Instant::now();
@@ -84,6 +85,7 @@ pub fn show(app: &Shared) {
                 && !a.ui.get_dragging()
                 && !a.editing
                 && win::foreground() != a.hwnd
+                && win::foreground() != a.stack_hwnd
                 && !free::hwnds(&a).contains(&win::foreground())
         };
         if lost {
@@ -93,6 +95,7 @@ pub fn show(app: &Shared) {
 }
 
 pub fn hide(app: &Shared) {
+    crate::stack::close(app);
     if app.borrow().editing {
         finish_edit(app);
     }
@@ -212,7 +215,24 @@ pub fn refresh(app: &Shared) {
         a.selected = None;
     }
 
-    let counts: Vec<usize> = (0..count).map(|d| windows.iter().filter(|w| w.desktop == d).count()).collect();
+    // Same-app windows on a desktop share one cell (a stack), unless you're searching. Windows come top-most (most recently used) first, so each stack's top
+    // card is its most recent window, and stacks are in most-recent order too.
+    let searching = !a.query.is_empty();
+    let stacks: Vec<Vec<Stack>> = (0..count)
+        .map(|d| {
+            let mut list: Vec<Stack> = Vec::new();
+            for w in windows.iter().filter(|w| w.desktop == d) {
+                let key = w.exe.as_deref().map(str::to_lowercase).unwrap_or_else(|| format!("#{}", w.hwnd));
+                match list.iter_mut().find(|s| s.key == key && !searching) {
+                    Some(s) => s.members.push(w.hwnd),
+                    None => list.push(Stack { top: w.clone(), members: vec![w.hwnd], key }),
+                }
+            }
+            list
+        })
+        .collect();
+    let counts: Vec<usize> = stacks.iter().map(|s| s.len()).collect();
+    a.stacks = stacks;
     let max_w = a.monitor.width as f32 / a.monitor.scale - 24.0;
     let max_h = a.monitor.height as f32 / a.monitor.scale - 24.0;
     // Free layout: the widgets are their own windows (src/free.rs), not in the panel
@@ -243,10 +263,24 @@ pub fn refresh(app: &Shared) {
     update_model(app);
 }
 
-/// The apps that get a cell on desktop `d`, top-most first.
+/// Windows of the same app on one desktop, shown as one cell. `top` is the most recent one.
+#[derive(Clone)]
+pub struct Stack {
+    pub top: WinInfo,
+    pub members: Vec<isize>,
+    /// The app (its .exe path, lower case)
+    pub key: String,
+}
+
+/// The cells on desktop `d` (one per stack), top-most first: each stack's top window.
 fn on_desk(a: &crate::App, d: usize) -> Vec<&WinInfo> {
     let cells = a.layout.desks.get(d).map_or(0, |k| k.cells.len());
-    a.windows.iter().filter(|w| w.desktop == d as u32).take(cells).collect()
+    a.stacks.get(d).map_or(Vec::new(), |s| s.iter().take(cells).map(|s| &s.top).collect())
+}
+
+/// How many windows are in the stack whose top window is `hwnd`.
+fn stack_size(a: &crate::App, hwnd: isize) -> usize {
+    a.stacks.iter().flatten().find(|s| s.top.hwnd == hwnd).map_or(1, |s| s.members.len())
 }
 
 /// Push the current windows/search/selection into the UI (no re-reading from Windows).
@@ -283,6 +317,7 @@ pub fn update_model(app: &Shared) {
                     hit: query.is_empty() || matches(&a.config, w, &query),
                     live: previews && !win::is_minimized(w.hwnd) && !private(&a.config, w),
                     private: private(&a.config, w),
+                    count: stack_size(&a, w.hwnd) as i32,
                     x: cell.x,
                     y: cell.y,
                     w: cell.w,
@@ -324,6 +359,7 @@ pub fn update_model(app: &Shared) {
         ui.set_edit_mode(a.editing);
         ui.set_custom_position(a.config.panel_x >= 0.0 || a.config.widget_groups.iter().any(|g| g.x >= 0.0));
         ui.set_query(a.query.as_str().into());
+        ui.set_query_all(a.query_all && !a.query.is_empty());
         ui.set_matches(if query.is_empty() { 0 } else { ordered(&a, &query).len() as i32 });
         ui.set_selected_id(a.selected.map_or(0, |s| s as i32));
     }
@@ -336,7 +372,7 @@ fn matches(c: &Config, w: &WinInfo, query: &str) -> bool {
     name.contains(query) || (!c.is_private(&name) && w.title.to_lowercase().contains(query))
 }
 
-fn private(c: &Config, w: &WinInfo) -> bool {
+pub fn private(c: &Config, w: &WinInfo) -> bool {
     c.is_private(&win::exe_name(&w.exe))
 }
 
@@ -714,6 +750,32 @@ fn on_key(app: &Shared, text: &str, ctrl: bool, shift: bool) -> bool {
         return true;
     }
 
+    // Ctrl+A selects the whole search text; the next key replaces or deletes all of it
+    let searching = !app.borrow().query.is_empty();
+    let first = text.chars().next();
+    if searching && ctrl && matches!(first, Some('a' | 'A' | '\u{1}')) {
+        app.borrow_mut().query_all = true;
+        update_model(app);
+        return true;
+    }
+    let all = std::mem::take(&mut app.borrow_mut().query_all);
+    if searching && (all || ctrl) && (t == k(Key::Backspace) || t == k(Key::Delete)) {
+        // Ctrl+Backspace also clears the whole search
+        app.borrow_mut().query.clear();
+        search_changed(app, true);
+        return true;
+    }
+    if all {
+        if let (Some(c), None) = (first, text.chars().nth(1)) {
+            if !ctrl && !c.is_control() {
+                app.borrow_mut().query = c.to_string();
+                search_changed(app, true);
+                return true;
+            }
+        }
+        update_model(app); // any other key just drops the selection
+    }
+
     if t == k(Key::Escape) {
         if app.borrow().query.is_empty() {
             hide(app);
@@ -851,7 +913,12 @@ pub fn wire(app: &Shared) {
     ui.on_desk_clicked(with!(|app, i| switch_to(app, i as u32)));
     ui.on_desk_close(with!(|app, i| close_desktop(app, i as u32)));
     ui.on_app_clicked(with!(|app, id| {
-        if let Some(win) = find(app, id) {
+        // A stack opens in its own window over the panel; a single window opens
+        let stack = app.borrow().stacks.iter().flatten().find(|s| s.top.hwnd as i32 == id && s.members.len() > 1).cloned();
+        if let Some(s) = stack {
+            stop_hover(app);
+            crate::stack::open(app, &s);
+        } else if let Some(win) = find(app, id) {
             open_window(app, win);
         }
     }));
