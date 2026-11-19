@@ -8,17 +8,20 @@
 //! themes.rs    colour themes
 //! thumbs.rs    live window previews
 //! win.rs       everything that talks to Windows
+//! update.rs    checking for and installing new versions
 
 #![windows_subsystem = "windows"]
 
 mod config;
 mod free;
 mod layout;
+mod net;
 mod overview;
 mod snap;
 mod stack;
 mod themes;
 mod thumbs;
+mod update;
 mod widget_ui;
 mod widgets;
 mod win;
@@ -81,9 +84,9 @@ pub struct App {
     pub icons: IconCache,
     pub layout: Layout,
     pub current: u32,
+    /// How many virtual desktops there are (when last read)
+    pub desk_count: u32,
     pub query: String,
-    /// Ctrl+A: the whole search text is selected (the next key replaces it)
-    pub query_all: bool,
     pub selected: Option<isize>,
     pub monitor: win::Monitor,
     /// The app you were using before opening the overview (the snap picker's partner)
@@ -126,6 +129,8 @@ pub struct App {
     pub notes: Rc<VecModel<NoteItem>>,
     /// The month the calendar shows (year, month 1-12)
     pub cal_month: (i32, u32),
+    /// The latest release on GitHub (after "Check for updates")
+    pub release: Option<update::Release>,
 }
 
 pub type Shared = Rc<RefCell<App>>;
@@ -143,7 +148,7 @@ thread_local! {
 }
 
 /// Run something against the app later, on the UI thread (used by tray/hotkey callbacks).
-fn post(f: impl FnOnce(&Shared) + Send + 'static) {
+pub fn post(f: impl FnOnce(&Shared) + Send + 'static) {
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(app) = APP.with(|a| a.borrow().clone()) {
             f(&app);
@@ -163,6 +168,7 @@ fn main() {
     if !win::single_instance(restarting) {
         return; // already running
     }
+    update::cleanup();
 
     if winvd::get_desktop_count().is_err() {
         win::message_box("Couldn't read your virtual desktops.\nWinOverview needs Windows 11.");
@@ -194,6 +200,8 @@ fn main() {
         icons: IconCache::default(),
         layout: layout::compute(&layout::Options {
             apps: &[0],
+            room: &[],
+            single: false,
             per_row: 5,
             mode: layout::Mode::Icons,
             orient: layout::Orient::Horizontal,
@@ -206,8 +214,8 @@ fn main() {
             widget_h: 156.0,
         }),
         current: 0,
+        desk_count: 1,
         query: String::new(),
-        query_all: false,
         selected: None,
         monitor: win::monitor(false),
         previous: 0,
@@ -236,6 +244,7 @@ fn main() {
         weather_busy: false,
         notes: Rc::new(VecModel::default()),
         cal_month: (2026, 1),
+        release: None,
     }));
     APP.with(|a| *a.borrow_mut() = Some(app.clone()));
 
@@ -321,7 +330,7 @@ fn create_tray(app: &Shared) {
 
     let icon = tray_icon::Icon::from_rgba(include_bytes!("../assets/tray32.rgba").to_vec(), 32, 32).ok();
     let mut builder = TrayIconBuilder::new()
-        .with_tooltip(format!("WinOverview ({})", app.borrow().config.hotkey))
+        .with_tooltip(tooltip(&app.borrow().config.hotkey))
         .with_menu(Box::new(menu))
         .with_menu_on_left_click(false);
     if let Some(icon) = icon {
@@ -363,6 +372,10 @@ fn create_tray(app: &Shared) {
     }));
 }
 
+fn tooltip(hotkey: &str) -> String {
+    format!("WinOverview v{} ({hotkey})", update::VERSION)
+}
+
 fn quit() {
     APP.with(|a| {
         if let Some(app) = a.borrow().as_ref() {
@@ -375,10 +388,15 @@ fn quit() {
     let _ = slint::quit_event_loop();
 }
 
-fn restart() {
+pub fn restart() {
     if let Ok(exe) = std::env::current_exe() {
-        let _ = std::process::Command::new(exe).arg("--restart").spawn();
+        restart_from(exe);
     }
+}
+
+/// Start `exe` (it waits for this one to close), then quit.
+pub fn restart_from(exe: std::path::PathBuf) {
+    let _ = std::process::Command::new(exe).arg("--restart").spawn();
     quit();
 }
 
@@ -433,6 +451,31 @@ fn open_settings(app: &Shared) {
                     }
                 }
             });
+            let w1 = Rc::downgrade(app);
+            s.on_check_updates(move || {
+                if let Some(app) = w1.upgrade() {
+                    update::check(&app);
+                }
+            });
+            let w1 = Rc::downgrade(app);
+            s.on_install_update(move || {
+                if let Some(app) = w1.upgrade() {
+                    update::install(&app);
+                }
+            });
+            let w1 = Rc::downgrade(app);
+            s.on_open_release(move || {
+                let page = w1.upgrade().and_then(|a| a.borrow().release.as_ref().map(|r| r.page.clone()));
+                win::open_url(&page.unwrap_or_else(update::release_page));
+            });
+            // Picking a theme shows it on this window right away (it's saved with Save)
+            let s2 = s.as_weak();
+            s.on_theme_picked(move |name| {
+                if let Some(s) = s2.upgrade() {
+                    s.set_look(themes::find(&name).to_ui());
+                }
+            });
+            s.set_version(update::VERSION.into());
             app.borrow_mut().settings = Some(s.clone_strong());
             s
         }
@@ -450,11 +493,14 @@ fn open_settings(app: &Shared) {
         s.set_startup(win::startup_enabled());
         s.set_accent(c.accent());
         s.set_theme(a.theme.name.into());
+        s.set_look(a.theme.to_ui());
         s.set_free_layout(c.free_layout);
         s.set_vertical(c.vertical());
         s.set_widgets_first(c.widgets_first);
         s.set_widget_size(c.widget_size.to_ascii_lowercase().as_str().into());
         s.set_privacy(c.privacy_mode);
+        s.set_one_desktop(c.one_desktop);
+        s.set_search_mode(c.search_mode.to_ascii_lowercase().as_str().into());
         s.set_privacy_apps(ModelRc::new(VecModel::from(privacy_list(&a))));
         s.set_flags(overview::flags(c));
         s.set_city(c.weather_city.as_str().into());
@@ -508,6 +554,8 @@ fn save_settings(app: &Shared) {
         a.config.widgets_first = s.get_widgets_first();
         a.config.widget_size = s.get_widget_size().to_string();
         a.config.privacy_mode = s.get_privacy();
+        a.config.one_desktop = s.get_one_desktop();
+        a.config.search_mode = s.get_search_mode().to_string();
         let privacy_apps = s.get_privacy_apps();
         for i in 0..privacy_apps.row_count() {
             if let Some(p) = privacy_apps.row_data(i) {
@@ -531,7 +579,7 @@ fn save_settings(app: &Shared) {
         a.config.accent_color = config::to_hex(s.get_accent());
         a.config.theme = s.get_theme().to_string();
         if let Some(t) = &a.tray {
-            let _ = t.icon.set_tooltip(Some(format!("WinOverview ({hotkey})")));
+            let _ = t.icon.set_tooltip(Some(tooltip(&hotkey)));
         }
         a.config.save()
     };
@@ -564,6 +612,9 @@ fn apply_look(app: &Shared) {
     if let Some(p) = &a.picker {
         p.set_theme(ui_theme.clone());
         p.set_accent(accent);
+    }
+    if let Some(s) = &a.settings {
+        s.set_look(a.theme.to_ui());
     }
     if let Some(v) = &a.stack_view {
         v.set_theme(ui_theme);

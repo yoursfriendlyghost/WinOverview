@@ -110,6 +110,11 @@ pub struct Layout {
 pub struct Options<'a> {
     /// `apps[i]` = number of apps on desktop i
     pub apps: &'a [usize],
+    /// `room[i]`: size desktop i's tile for at least this many apps (keeps its size while a
+    /// search hides apps). Empty or 0 = just `apps[i]`.
+    pub room: &'a [usize],
+    /// One grid of every window (one tile, no desktop number, no "+")
+    pub single: bool,
     pub per_row: usize,
     pub mode: Mode,
     pub orient: Orient,
@@ -127,9 +132,10 @@ pub struct Options<'a> {
 }
 
 pub fn compute(o: &Options) -> Layout {
-    let scales: &[f32] = match o.mode {
-        Mode::Icons => &[1.0],
-        Mode::Previews => &[1.0, 0.85, 0.72, 0.6],
+    let scales: &[f32] = match (o.mode, o.single) {
+        (Mode::Icons, _) => &[1.0],
+        (Mode::Previews, false) => &[1.0, 0.85, 0.72, 0.6],
+        (Mode::Previews, true) => &[1.0, 0.85, 0.72, 0.6, 0.5],
     };
     let per_row = o.per_row.clamp(1, 10);
     // Try the requested number per row at full size, then smaller previews, then fewer per row
@@ -142,24 +148,31 @@ pub fn compute(o: &Options) -> Layout {
             }
             last = Some(l);
         }
-        if o.orient == Orient::Vertical {
-            break; // per_row doesn't apply to a column
+        if o.orient == Orient::Vertical || o.single {
+            break; // per_row doesn't apply to a column or the single grid
         }
     }
     last.unwrap_or_else(|| arrange(o, 1, 0.6))
 }
 
+/// One grid of every window: at most this many previews (the rest are counted in "+N").
+const SINGLE_MAX_COLS: usize = 8;
+
 /// A desktop tile's size and its app cells (relative to the tile).
-fn tile(n: usize, mode: Mode, scale: f32, icon_cols: usize) -> (f32, f32, Vec<Rect>, usize, Rect) {
+/// `n` apps get cells; the tile is sized for `room` (at least `n`).
+fn tile(n: usize, room: usize, mode: Mode, scale: f32, icon_cols: usize, single: bool) -> (f32, f32, Vec<Rect>, usize, Rect) {
+    let room = room.max(n);
+    // The single grid has no number pill at the top
+    let head = if single { INSET } else { HEAD };
     match mode {
         Mode::Icons => {
             let cols = icon_cols;
             let w = INSET * 2.0 + cols as f32 * CELL - 6.0;
-            let h = HEAD + n.div_ceil(cols).max(1) as f32 * CELL + 6.0;
+            let h = head + room.div_ceil(cols).max(1) as f32 * CELL + 6.0;
             let cells = (0..n)
                 .map(|i| Rect {
                     x: INSET + (i % cols) as f32 * CELL,
-                    y: HEAD + (i / cols) as f32 * CELL,
+                    y: head + (i / cols) as f32 * CELL,
                     w: ICON_CELL,
                     h: ICON_CELL,
                 })
@@ -167,30 +180,40 @@ fn tile(n: usize, mode: Mode, scale: f32, icon_cols: usize) -> (f32, f32, Vec<Re
             (w, h, cells, 0, Rect::default())
         }
         Mode::Previews => {
-            let max_slots = MAX_COLS * MAX_COLS;
+            let max_cols = if single { SINGLE_MAX_COLS } else { MAX_COLS };
+            let max_slots = max_cols * max_cols;
             let shown = if n > max_slots { max_slots - 1 } else { n };
             let more = n - shown;
-            let slots = (shown + usize::from(more > 0)).max(1);
-            // Smallest square-ish grid that fits: 1, 2×2, 3×3, 4×4, 5×5, 6×6
-            let cols = match slots {
-                1 => 1,
-                2..=4 => 2,
-                _ => ((slots as f32).sqrt().ceil() as usize).clamp(3, MAX_COLS),
+            let slots = (room.min(max_slots).max(shown + usize::from(more > 0))).max(1);
+            let cols = if single {
+                // wide rather than square: the screen is wide
+                match slots {
+                    1..=3 => slots,
+                    4 => 2,
+                    _ => ((slots as f32 * 1.6).sqrt().ceil() as usize).clamp(3, max_cols),
+                }
+            } else {
+                // Smallest square-ish grid that fits: 1, 2×2, 3×3, 4×4, 5×5, 6×6
+                match slots {
+                    1 => 1,
+                    2..=4 => 2,
+                    _ => ((slots as f32).sqrt().ceil() as usize).clamp(3, max_cols),
+                }
             };
             let rows = slots.div_ceil(cols);
-            let shrink = if cols > FULL_SIZE_COLS { FULL_SIZE_COLS as f32 / cols as f32 } else { 1.0 };
+            let shrink = if !single && cols > FULL_SIZE_COLS { FULL_SIZE_COLS as f32 / cols as f32 } else { 1.0 };
             let g = if cols > 4 { SLOT_GAP * 0.75 } else { SLOT_GAP };
             let (sw, sh) = (SLOT_W * scale * shrink, (SLOT_H * scale * shrink).max(PREVIEW_HEADER + 34.0));
             let at = |i: usize| Rect {
                 x: INSET + (i % cols) as f32 * (sw + g),
-                y: HEAD + (i / cols) as f32 * (sh + g),
+                y: head + (i / cols) as f32 * (sh + g),
                 w: sw,
                 h: sh,
             };
             let cells = (0..shown).map(at).collect();
             let more_cell = if more > 0 { at(shown) } else { Rect::default() };
             let w = INSET * 2.0 + cols as f32 * sw + (cols - 1) as f32 * g;
-            let h = HEAD + rows as f32 * sh + (rows - 1) as f32 * g + INSET;
+            let h = head + rows as f32 * sh + (rows - 1) as f32 * g + INSET;
             (w, h, cells, more, more_cell)
         }
     }
@@ -199,14 +222,27 @@ fn tile(n: usize, mode: Mode, scale: f32, icon_cols: usize) -> (f32, f32, Vec<Re
 /// Desktops (+ the "+" tile) placed from (0, 0). Returns them and the block's size.
 fn desk_block(o: &Options, per_row: usize, scale: f32) -> (Vec<Desk>, Rect, f32, f32) {
     let apps = o.apps;
+    let room = |i: usize| o.room.get(i).copied().unwrap_or(0);
+
+    if o.single {
+        // One wide grid: about three times as wide as tall, as wide as the screen allows
+        let n = apps.first().copied().unwrap_or(0);
+        let size = n.max(room(0));
+        let fit = (((o.max_w - PAD * 2.0 - INSET * 2.0 + 6.0) / CELL).floor() as usize).max(6);
+        let icon_cols = ((size as f32 * 3.0).sqrt().ceil() as usize).clamp(6, fit);
+        let (w, h, cells, more, more_cell) = tile(n, room(0), o.mode, scale, icon_cols, true);
+        let desk = Desk { rect: Rect { x: 0.0, y: 0.0, w, h }, cells, more, more_cell };
+        return (vec![desk], Rect::default(), w, h);
+    }
+
     // Icons view: wider tiles once a desktop gets crowded (same width for all, so they line up)
-    let most = apps.iter().copied().max().unwrap_or(0);
+    let most = apps.iter().enumerate().map(|(i, &n)| n.max(room(i))).max().unwrap_or(0);
     let icon_cols = match most {
         0..=16 => 4,
         17..=30 => 5,
         _ => 6,
     };
-    let tiles: Vec<_> = apps.iter().map(|&n| tile(n, o.mode, scale, icon_cols)).collect();
+    let tiles: Vec<_> = apps.iter().enumerate().map(|(i, &n)| tile(n, room(i), o.mode, scale, icon_cols, false)).collect();
     let mut desks = Vec::with_capacity(apps.len());
     let mut plus = Rect::default();
 

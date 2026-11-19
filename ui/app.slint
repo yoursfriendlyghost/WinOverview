@@ -1,7 +1,7 @@
 // WinOverview UI: the overview panel, the snap picker and the Settings window.
 // All positions are worked out in Rust (src/layout.rs) and passed in as x/y/w/h.
 
-import { LineEdit, SpinBox, CheckBox, Button, Slider, ScrollView } from "std-widgets.slint";
+import { LineEdit, SpinBox, CheckBox, Button, Slider, ScrollView, Palette as StdPalette } from "std-widgets.slint";
 
 import { Theme, Palette, CloseDot, Chip, Glyph, RoundButton } from "common.slint";
 import { WidgetState, WidgetCard, NoteItem, CalDay } from "widgets.slint";
@@ -57,10 +57,10 @@ export component Overview inherits Window {
     in property <bool> thumbs-on: false;    // live previews are currently drawn
     in property <int> selected-id: 0;
     in property <bool> shown: false;
-    in property <string> query;
-    in property <bool> query-all: false;     // Ctrl+A: the whole search text is selected
+    in-out property <string> query;          // the search text (typed into the search box)
     in property <int> matches: 0;           // apps matching the search
     in property <bool> can-close-desk: true;
+    in property <bool> single: false;       // one grid of every window: no desktops to show
 
     in-out property <bool> dragging: false;
     in-out property <int> desk-drag: -1;     // desktop being dragged (-1: none)
@@ -79,7 +79,8 @@ export component Overview inherits Window {
     callback app-dropped(int, length, length);
     callback add-clicked();
     callback desk-dropped(int, length, length);   // desktop, where it was dropped
-    callback key-pressed(string, bool, bool) -> bool;   // text, ctrl, shift
+    callback key-pressed(string, bool, bool) -> bool;   // text, ctrl, shift; true = handled
+    callback search-edited(string);
 
     // widgets
     in property <[WidgetSlot]> widget-slots;
@@ -91,15 +92,17 @@ export component Overview inherits Window {
     callback edit-drag(int);         // moving the panel: 0 = pressed, 1 = mouse moved, 2 = released
     callback edit-reset();
     callback edit-done();
+    // edit mode, widgets inside the panel: drag one onto another's place to move it there
+    in-out property <int> widget-drag: -1;
+    in-out property <length> widget-drag-x;
+    in-out property <length> widget-drag-y;
+    callback widget-moved(int, length, length);   // which (its index), where it was dropped
 
-    public function focus-keys() { keys.focus(); }
+    public function focus-keys() { search.focus(); }
 
-    keys := FocusScope {
-        key-pressed(e) => {
-            if (root.key-pressed(e.text, e.modifiers.control, e.modifiers.shift)) { return accept; }
-            return reject;
-        }
-    }
+    // Search capsule width (measured from the text)
+    measure := Text { text: root.query; font-size: 14px; font-weight: 600; visible: false; }
+    property <length> cap-w: min(root.panel-w - 28px, max(240px, measure.preferred-width + 96px));
 
     // Everything fades and slides in when opened
     content := Rectangle {
@@ -114,7 +117,7 @@ export component Overview inherits Window {
                 && root.drag-y >= d.y && root.drag-y < d.y + d.h;
             // an app or another desktop is being dragged over this one
             property <bool> target: self.under-pointer
-                && (root.dragging || (root.desk-drag >= 0 && root.desk-drag != d.index));
+                && !root.single && (root.dragging || (root.desk-drag >= 0 && root.desk-drag != d.index));
             opacity: root.desk-drag == d.index ? 0.35 : 1;
             animate opacity { duration: 120ms; }
 
@@ -132,7 +135,7 @@ export component Overview inherits Window {
 
             tile := TouchArea {
                 property <bool> did-drag: false;
-                mouse-cursor: pointer;
+                mouse-cursor: root.single ? MouseCursor.default : MouseCursor.pointer;
                 // drag a desktop onto another one to move it there
                 pointer-event(e) => {
                     if (e.button == PointerEventButton.left && e.kind == PointerEventKind.down) {
@@ -145,7 +148,7 @@ export component Overview inherits Window {
                     }
                 }
                 moved => {
-                    if (self.pressed && root.desk-drag < 0 && !root.dragging && !root.edit-mode
+                    if (self.pressed && root.desk-drag < 0 && !root.dragging && !root.edit-mode && !root.single
                         && (abs(self.mouse-x - self.pressed-x) > 8px || abs(self.mouse-y - self.pressed-y) > 8px)) {
                         self.did-drag = true;
                         root.desk-drag = d.index;
@@ -158,7 +161,7 @@ export component Overview inherits Window {
                 clicked => { if (!self.did-drag) { root.desk-clicked(d.index); } }
 
                 // number pill
-                Rectangle {
+                if !root.single: Rectangle {
                     x: 10px; y: 9px; height: 18px;
                     width: max(18px, num.preferred-width + 12px);
                     border-radius: 9px;
@@ -315,7 +318,7 @@ export component Overview inherits Window {
                     }
                 }
 
-                if tile.has-hover && root.can-close-desk && !root.dragging: CloseDot {
+                if tile.has-hover && root.can-close-desk && !root.dragging && !root.single: CloseDot {
                     x: parent.width - 26px; y: 8px;
                     clicked => { root.desk-close(d.index); }
                 }
@@ -323,7 +326,7 @@ export component Overview inherits Window {
         }
 
         // ---- "+" new desktop ----
-        Rectangle {
+        if !root.single: Rectangle {
             property <bool> target: root.dragging
                 && root.drag-x >= root.plus-x && root.drag-x < root.plus-x + root.plus-w
                 && root.drag-y >= root.plus-y && root.drag-y < root.plus-y + root.plus-h;
@@ -344,8 +347,9 @@ export component Overview inherits Window {
         }
 
         // ---- widgets ----
-        for w in root.widget-slots: WidgetCard {
+        for w[wi] in root.widget-slots: WidgetCard {
             x: w.x; y: w.y; width: w.w; height: w.h;
+            opacity: root.widget-drag == wi ? 0.3 : 1;
             animate x, y { duration: 160ms; easing: ease-out; }
             kind: w.kind;
             escape => { root.focus-keys(); }
@@ -358,33 +362,47 @@ export component Overview inherits Window {
             opacity: self.has-hover ? 1 : 0.45;
             clicked => { root.edit-start(); }
         }
-        // ---- search: a capsule at the top while you type ----
+        // ---- search: a capsule at the top while you type (the text box itself is below) ----
         if root.query != "": Rectangle {
-            property <length> w: min(root.panel-w - 28px, max(240px, q.preferred-width + 90px));
-            x: (root.panel-w - self.w) / 2; y: 12px;
-            width: self.w; height: 32px;
+            x: (root.panel-w - root.cap-w) / 2; y: 12px;
+            width: root.cap-w; height: 32px;
             border-radius: 16px;
             background: Palette.accent;
             drop-shadow-blur: 10px; drop-shadow-color: Palette.accent.with-alpha(0.35);
             Glyph { x: 14px; name: "search"; width: 14px; height: 14px; tint: #111216; }
-            if root.query-all: Rectangle {
-                x: 35px; y: 6px; height: parent.height - 12px;
-                width: min(q.preferred-width, parent.width - 90px) + 6px;
-                border-radius: 4px;
-                background: #111216.with-alpha(0.28);
-            }
-            q := Text {
-                x: 38px; width: parent.width - 90px; height: parent.height;
-                text: root.query;
-                color: #111216; font-size: 14px; font-weight: 600;
-                overflow: elide; vertical-alignment: center;
-            }
             Text {
                 x: parent.width - 52px; width: 40px; height: parent.height;
                 text: root.matches == 0 ? "none" : root.matches;
                 color: #111216.with-alpha(0.6); font-size: 12px;
                 horizontal-alignment: right; vertical-alignment: center;
             }
+        }
+    }
+
+    // The search box. It always has the keyboard, so typing anywhere starts a search; it sits
+    // off-screen until there's text. Keys that move around the panel are taken before it sees them
+    // (capture-key-pressed); the rest edit the text like any text box (Home, End, Ctrl+arrows,
+    // Shift+arrows, Ctrl+A, Ctrl+Backspace, Ctrl+C/V/X...).
+    keys := FocusScope {
+        // a 1-pixel spot in the corner until there's text (it has to stay on screen to keep focus)
+        x: root.query != "" ? (root.panel-w - root.cap-w) / 2 : 0;
+        y: root.query != "" ? 12px : 0;
+        width: root.query != "" ? root.cap-w : 1px;
+        height: root.query != "" ? 32px : 1px;
+        capture-key-pressed(e) => {
+            if (root.key-pressed(e.text, e.modifiers.control, e.modifiers.shift)) { return accept; }
+            return reject;
+        }
+        search := TextInput {
+            x: root.query != "" ? 38px : 0; width: max(1px, parent.width - 96px); height: parent.height;
+            text <=> root.query;
+            single-line: true;
+            color: root.query != "" ? #111216 : transparent;
+            font-size: 14px; font-weight: 600;
+            vertical-alignment: center;
+            selection-background-color: #111216.with-alpha(0.3);
+            selection-foreground-color: #111216;
+            edited => { root.search-edited(self.text); }
         }
     }
 
@@ -401,6 +419,50 @@ export component Overview inherits Window {
     if root.edit-mode: Rectangle {
         border-width: 2px; border-color: Palette.accent;
         border-radius: 8px;
+    }
+    // edit mode: each widget is a handle of its own; drop it on another widget to swap places
+    if root.edit-mode: Rectangle {
+        for w[wi] in root.widget-slots: Rectangle {
+            property <bool> target: root.widget-drag >= 0 && root.widget-drag != wi
+                && root.widget-drag-x >= w.x && root.widget-drag-x < w.x + w.w
+                && root.widget-drag-y >= w.y && root.widget-drag-y < w.y + w.h;
+            x: w.x; y: w.y; width: w.w; height: w.h;
+            border-radius: 14px;
+            border-width: self.target ? 2px : (wta.has-hover && root.widget-drag < 0 ? 1.5px : 0px);
+            border-color: Palette.accent;
+            background: self.target ? Palette.accent.with-alpha(0.14) : transparent;
+            wta := TouchArea {
+                mouse-cursor: MouseCursor.grab;
+                moved => {
+                    if (self.pressed) {
+                        root.widget-drag = wi;
+                        root.widget-drag-x = w.x + self.mouse-x;
+                        root.widget-drag-y = w.y + self.mouse-y;
+                    }
+                }
+                pointer-event(e) => {
+                    if (e.button == PointerEventButton.left && e.kind == PointerEventKind.up && root.widget-drag == wi) {
+                        root.widget-drag = -1;
+                        root.widget-moved(wi, root.widget-drag-x, root.widget-drag-y);
+                    }
+                }
+            }
+        }
+        // the one being moved follows the pointer
+        for w[wi] in root.widget-slots: Rectangle {
+            visible: root.widget-drag == wi;
+            x: root.widget-drag-x - w.w / 2; y: root.widget-drag-y - w.h / 2;
+            width: w.w; height: w.h;
+            border-radius: 14px;
+            background: Palette.t.panel.with-alpha(0.92);
+            border-width: 2px; border-color: Palette.accent;
+            drop-shadow-blur: 16px; drop-shadow-color: #00000060;
+            Text {
+                text: w.kind == 0 ? "Notes" : w.kind == 1 ? "Music" : w.kind == 2 ? "Timer" : w.kind == 3 ? "Weather" : "Calendar";
+                color: Palette.t.text; font-size: 14px; font-weight: 600;
+                horizontal-alignment: center; vertical-alignment: center;
+            }
+        }
     }
     if root.edit-mode: Rectangle {
         x: 0; y: 0; width: parent.width; height: 46px;
@@ -742,14 +804,14 @@ component Row inherits HorizontalLayout {
     VerticalLayout {
         alignment: center;
         horizontal-stretch: 1;
-        Text { text: root.label; font-size: 14px; color: #f0f0f2; }
-        if root.note != "": Text { text: root.note; font-size: 11px; color: #ffffff80; wrap: word-wrap; }
+        Text { text: root.label; font-size: 14px; color: Palette.t.text; }
+        if root.note != "": Text { text: root.note; font-size: 11px; color: Palette.t.faint; wrap: word-wrap; }
     }
     @children
 }
 
 component Heading inherits Text {
-    font-size: 12px; font-weight: 600; color: #ffffff80;
+    font-size: 12px; font-weight: 600; color: Palette.t.faint;
 }
 
 export component Settings inherits Window {
@@ -758,7 +820,26 @@ export component Settings inherits Window {
     preferred-width: 540px;
     min-width: 480px;
     preferred-height: 820px;
-    background: #202024;
+    background: Palette.t.panel;
+
+    // The colour theme (follows the theme you pick, before saving too)
+    in property <Theme> look;      // set from Rust before the window is shown
+    changed look => {
+        Palette.t = self.look;
+        StdPalette.color-scheme = self.look.dark ? ColorScheme.dark : ColorScheme.light;
+    }
+    callback theme-picked(string);
+
+    // Version and updates
+    in property <string> version;
+    in property <string> update-status;
+    in property <bool> update-error: false;
+    in property <bool> update-ready: false;     // a newer version can be installed
+    in property <bool> update-failed: false;    // installing failed: offer the release page
+    in property <string> update-notes;
+    callback check-updates();
+    callback install-update();
+    callback open-release();
 
     in-out property <string> hotkey: "Alt+`";
     in-out property <bool> previews: false;
@@ -777,6 +858,8 @@ export component Settings inherits Window {
     in-out property <WidgetFlags> flags;
     in-out property <bool> privacy: false;
     in property <[PrivacyApp]> privacy-apps;
+    in-out property <bool> one-desktop: false;     // one grid of every window
+    in-out property <string> search-mode: "dim";   // "dim", "hide" or "top"
     callback privacy-toggle(int, bool);
     in-out property <string> city;
     in-out property <bool> fahrenheit: false;
@@ -796,7 +879,7 @@ export component Settings inherits Window {
                 padding-bottom: 8px;
                 spacing: 14px;
 
-                Text { text: "Settings"; font-size: 22px; font-weight: 600; color: white; }
+                Text { text: "Settings"; font-size: 22px; font-weight: 600; color: Palette.t.text; }
 
                 Heading { text: "GENERAL"; }
                 Row {
@@ -816,6 +899,28 @@ export component Settings inherits Window {
                         spacing: 6px;
                         Button { text: "Icons"; primary: !root.previews; clicked => { root.previews = false; } }
                         Button { text: "Live previews"; primary: root.previews; clicked => { root.previews = true; } }
+                    }
+                }
+                Row {
+                    label: "Windows";
+                    note: root.one-desktop ? "Every window in one grid (for one desktop with lots of windows)"
+                                           : "A tile for each desktop";
+                    HorizontalLayout {
+                        spacing: 6px;
+                        Button { text: "Per desktop"; primary: !root.one-desktop; clicked => { root.one-desktop = false; } }
+                        Button { text: "One grid"; primary: root.one-desktop; clicked => { root.one-desktop = true; } }
+                    }
+                }
+                Row {
+                    label: "Search";
+                    note: root.search-mode == "hide" ? "Windows that don't match are hidden"
+                        : root.search-mode == "top" ? "Matching windows move to the front"
+                        : "Windows that don't match are faded";
+                    HorizontalLayout {
+                        spacing: 6px;
+                        Button { text: "Fade"; primary: root.search-mode == "dim"; clicked => { root.search-mode = "dim"; } }
+                        Button { text: "Hide"; primary: root.search-mode == "hide"; clicked => { root.search-mode = "hide"; } }
+                        Button { text: "To front"; primary: root.search-mode == "top"; clicked => { root.search-mode = "top"; } }
                     }
                 }
                 Row {
@@ -853,7 +958,7 @@ export component Settings inherits Window {
                         Button { text: "Move\u{2026}"; clicked => { root.edit-on-screen(); } }
                     }
                 }
-                Row {
+                if !root.one-desktop: Row {
                     label: "Desktops per row";
                     SpinBox { width: 120px; minimum: 1; maximum: 10; value <=> root.per-row; }
                 }
@@ -917,20 +1022,20 @@ export component Settings inherits Window {
                 }
                 if root.privacy && root.privacy-apps.length == 0: Text {
                     text: "Open some apps, then come back here to pick them.";
-                    color: #ffffff80; font-size: 12px;
+                    color: Palette.t.faint; font-size: 12px;
                 }
                 if root.privacy: VerticalLayout {
                     spacing: 2px;
                     for app[i] in root.privacy-apps: Rectangle {
                         height: 34px;
                         border-radius: 6px;
-                        background: row-ta.has-hover ? #ffffff0c : transparent;
+                        background: row-ta.has-hover ? Palette.t.cell-hover : transparent;
                         row-ta := TouchArea { clicked => { root.privacy-toggle(i, !app.on); } }
                         HorizontalLayout {
                             padding-left: 8px; padding-right: 8px;
                             spacing: 10px;
                             Image { source: app.icon; width: 20px; height: 20px; y: 7px; }
-                            Text { text: app.name; color: #f0f0f2; font-size: 13px; vertical-alignment: center;
+                            Text { text: app.name; color: Palette.t.text; font-size: 13px; vertical-alignment: center;
                                    horizontal-stretch: 1; min-width: 200px; }
                             CheckBox { checked: app.on; toggled => { root.privacy-toggle(i, self.checked); } }
                         }
@@ -938,7 +1043,7 @@ export component Settings inherits Window {
                 }
 
                 Heading { text: "LOOK"; }
-                Text { text: "Theme"; font-size: 14px; color: #f0f0f2; }
+                Text { text: "Theme"; font-size: 14px; color: Palette.t.text; }
                 Rectangle {
                     height: ceil(root.themes.length / 4) * 74px;
                     for t[i] in root.themes: Rectangle {
@@ -949,7 +1054,7 @@ export component Settings inherits Window {
                         border-radius: 10px;
                         background: t.panel;
                         border-width: self.chosen ? 2.5px : 1px;
-                        border-color: self.chosen ? root.accent : #ffffff26;
+                        border-color: self.chosen ? root.accent : Palette.t.border;
                         Rectangle {
                             x: 8px; y: 8px; width: parent.width - 16px; height: 26px;
                             border-radius: 6px; background: t.tile;
@@ -957,7 +1062,7 @@ export component Settings inherits Window {
                             Rectangle { x: 22px; y: 8px; width: 10px; height: 10px; border-radius: 3px; background: t.text.with-alpha(0.5); }
                         }
                         Text { x: 8px; y: 40px; text: t.name; color: t.text; font-size: 11px; }
-                        TouchArea { mouse-cursor: pointer; clicked => { root.theme = t.name; } }
+                        TouchArea { mouse-cursor: pointer; clicked => { root.theme = t.name; root.theme-picked(t.name); } }
                     }
                 }
                 Row {
@@ -968,9 +1073,31 @@ export component Settings inherits Window {
                             width: 24px; height: 24px; border-radius: 12px;
                             background: c;
                             border-width: root.accent == c ? 3px : 0px;
-                            border-color: white;
+                            border-color: Palette.t.text;
                             TouchArea { mouse-cursor: pointer; clicked => { root.accent = c; } }
                         }
+                    }
+                }
+
+                Heading { text: "ABOUT"; }
+                Row {
+                    label: "WinOverview v" + root.version;
+                    note: root.update-status;
+                    HorizontalLayout {
+                        spacing: 6px;
+                        if root.update-ready: Button { text: "Update now"; primary: true; clicked => { root.install-update(); } }
+                        if root.update-failed: Button { text: "Release page"; clicked => { root.open-release(); } }
+                        if !root.update-ready: Button { text: "Check for updates"; clicked => { root.check-updates(); } }
+                    }
+                }
+                if root.update-notes != "": Rectangle {
+                    border-radius: 8px;
+                    background: Palette.t.cell;
+                    VerticalLayout {
+                        padding: 12px;
+                        spacing: 4px;
+                        Text { text: "What's new"; font-size: 12px; font-weight: 600; color: Palette.t.text; }
+                        Text { text: root.update-notes; font-size: 12px; color: Palette.t.text; wrap: word-wrap; }
                     }
                 }
             }
@@ -983,7 +1110,7 @@ export component Settings inherits Window {
             Text {
                 horizontal-stretch: 1;
                 text: root.status;
-                color: root.status-error ? #ff8a8a : #9be3a6;
+                color: root.status-error ? (Palette.t.dark ? #ff8a8a : #c42b2b) : (Palette.t.dark ? #9be3a6 : #1f7a35);
                 vertical-alignment: center;
                 wrap: word-wrap;
             }

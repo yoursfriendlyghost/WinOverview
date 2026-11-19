@@ -34,7 +34,6 @@ pub fn show(app: &Shared) {
             a.previous = fg;
         }
         a.query.clear();
-        a.query_all = false;
         a.selected = None;
         a.visible = true;
         a.shown_at = Instant::now();
@@ -202,35 +201,74 @@ fn mode(app: &crate::App) -> Mode {
 
 /// Re-read desktops and windows and rebuild what's shown.
 pub fn refresh(app: &Shared) {
-    let mut a = app.borrow_mut();
-    let count = win::desktop_count();
-    let current = win::current_desktop();
-    let exclude = [a.hwnd, a.picker_hwnd];
-    let mut windows = win::list_windows(&exclude, current);
-    windows.retain(|w| w.desktop < count);
+    {
+        let mut a = app.borrow_mut();
+        let count = win::desktop_count();
+        let current = win::current_desktop();
+        let exclude = [a.hwnd, a.picker_hwnd];
+        let mut windows = win::list_windows(&exclude, current);
+        windows.retain(|w| w.desktop < count);
 
-    let open: Vec<isize> = windows.iter().map(|w| w.hwnd).collect();
-    a.icons.prune(&open);
-    if a.selected.is_some_and(|s| !open.contains(&s)) {
-        a.selected = None;
+        let open: Vec<isize> = windows.iter().map(|w| w.hwnd).collect();
+        a.icons.prune(&open);
+        if a.selected.is_some_and(|s| !open.contains(&s)) {
+            a.selected = None;
+        }
+        a.windows = windows;
+        a.current = current;
+        a.desk_count = count;
     }
+    rebuild(app);
+}
 
-    // Same-app windows on a desktop share one cell (a stack), unless you're searching. Windows come top-most (most recently used) first, so each stack's top
-    // card is its most recent window, and stacks are in most-recent order too.
-    let searching = !a.query.is_empty();
-    let stacks: Vec<Vec<Stack>> = (0..count)
-        .map(|d| {
-            let mut list: Vec<Stack> = Vec::new();
-            for w in windows.iter().filter(|w| w.desktop == d) {
-                let key = w.exe.as_deref().map(str::to_lowercase).unwrap_or_else(|| format!("#{}", w.hwnd));
-                match list.iter_mut().find(|s| s.key == key && !searching) {
-                    Some(s) => s.members.push(w.hwnd),
-                    None => list.push(Stack { top: w.clone(), members: vec![w.hwnd], key }),
-                }
+/// One grid of every window, instead of a tile per desktop.
+pub fn one_grid(a: &crate::App) -> bool {
+    a.config.one_desktop
+}
+
+/// Group the windows into cells and work out the layout (no re-reading from Windows).
+///
+/// Same-app windows on a desktop share one cell (a stack). Windows come top-most (most recently
+/// used) first, so each stack's top card is its most recent window, and stacks are in
+/// most-recent order too. While searching, matching windows get a cell of their own, and the
+/// others are dimmed, hidden, or put after the matches (Settings > Search).
+fn rebuild(app: &Shared) {
+    let mut a = app.borrow_mut();
+    let single = one_grid(&a);
+    let count = if single { 1 } else { a.desk_count.max(1) };
+    let query = a.query.to_lowercase();
+    let searching = !query.is_empty();
+    let (hide, sort) = (searching && a.config.search_hides(), searching && a.config.search_sorts());
+
+    let mut stacks: Vec<Vec<Stack>> = Vec::with_capacity(count as usize);
+    let mut room: Vec<usize> = Vec::with_capacity(count as usize);
+    for d in 0..count {
+        let here = a.windows.iter().filter(|w| single || w.desktop == d);
+        let mut list: Vec<Stack> = Vec::new();
+        let mut plain = 0; // cells there'd be without a search (keeps the tile's size while hiding)
+        let mut seen = std::collections::HashSet::new();
+        for w in here {
+            let app_key = w.exe.as_deref().map(str::to_lowercase).unwrap_or_else(|| format!("#{}", w.hwnd));
+            if seen.insert(app_key.clone()) {
+                plain += 1;
             }
-            list
-        })
-        .collect();
+            let hit = searching && matches(&a.config, w, &query);
+            if hide && !hit {
+                continue;
+            }
+            let key = if hit { format!("#{}", w.hwnd) } else { app_key.clone() };
+            match list.iter_mut().find(|s| s.key == key) {
+                Some(s) => s.members.push(w.hwnd),
+                None => list.push(Stack { top: w.clone(), members: vec![w.hwnd], key }),
+            }
+        }
+        if sort {
+            // matches first, otherwise in the same order
+            list.sort_by_key(|s| !matches(&a.config, &s.top, &query));
+        }
+        room.push(if hide { plain } else { 0 });
+        stacks.push(list);
+    }
     let counts: Vec<usize> = stacks.iter().map(|s| s.len()).collect();
     a.stacks = stacks;
     let max_w = a.monitor.width as f32 / a.monitor.scale - 24.0;
@@ -239,6 +277,8 @@ pub fn refresh(app: &Shared) {
     let widgets = if a.config.free() { Vec::new() } else { a.config.widget_list() };
     let opts = layout::Options {
         apps: &counts,
+        room: &room,
+        single,
         per_row: a.config.desktops_per_row as usize,
         mode: mode(&a),
         orient: if a.config.desktops_vertical() { Orient::Vertical } else { Orient::Horizontal },
@@ -248,7 +288,7 @@ pub fn refresh(app: &Shared) {
         max_h,
         top: if a.editing {
             layout::EDIT_BAR
-        } else if !a.query.is_empty() {
+        } else if searching {
             layout::SEARCH_BAR
         } else {
             0.0
@@ -257,8 +297,6 @@ pub fn refresh(app: &Shared) {
         widget_h: a.config.widget_size_px().1,
     };
     a.layout = layout::compute(&opts);
-    a.windows = windows;
-    a.current = current;
     drop(a);
     update_model(app);
 }
@@ -330,7 +368,7 @@ pub fn update_model(app: &Shared) {
                 y: d.rect.y,
                 w: d.rect.w,
                 h: d.rect.h,
-                current: i as u32 == a.current,
+                current: !one_grid(&a) && i as u32 == a.current,
                 apps: ModelRc::new(VecModel::from(apps)),
                 more: d.more as i32,
                 more_x: d.more_cell.x,
@@ -341,6 +379,7 @@ pub fn update_model(app: &Shared) {
         }
         let ui = &a.ui;
         ui.set_previews(previews);
+        ui.set_single(one_grid(&a));
         ui.set_desks(ModelRc::new(VecModel::from(desks)));
         ui.set_plus_x(a.layout.plus.x);
         ui.set_plus_y(a.layout.plus.y);
@@ -358,8 +397,9 @@ pub fn update_model(app: &Shared) {
         ui.set_widget_slots(ModelRc::new(VecModel::from(slots)));
         ui.set_edit_mode(a.editing);
         ui.set_custom_position(a.config.panel_x >= 0.0 || a.config.widget_groups.iter().any(|g| g.x >= 0.0));
-        ui.set_query(a.query.as_str().into());
-        ui.set_query_all(a.query_all && !a.query.is_empty());
+        if ui.get_query() != a.query.as_str() {
+            ui.set_query(a.query.as_str().into());
+        }
         ui.set_matches(if query.is_empty() { 0 } else { ordered(&a, &query).len() as i32 });
         ui.set_selected_id(a.selected.map_or(0, |s| s as i32));
     }
@@ -574,8 +614,9 @@ fn dropped(app: &Shared, id: i32, x: f32, y: f32) {
             x < 0.0 || y < 0.0 || x >= l.width || y >= l.height,
         )
     };
+    let single = one_grid(&app.borrow());
     if let Some(d) = target {
-        if d as u32 != w.desktop {
+        if !single && d as u32 != w.desktop {
             win::move_to_desktop(w.hwnd, d as u32);
             refresh_soon(app, 60);
             return;
@@ -618,6 +659,7 @@ pub fn edit_start(app: &Shared) {
 
 /// Save where the panel is now, and leave edit mode.
 fn finish_edit(app: &Shared) {
+    app.borrow().ui.set_widget_drag(-1);
     let mut a = app.borrow_mut();
     a.editing = false;
     if a.hwnd != 0 {
@@ -706,6 +748,35 @@ pub fn drag_window(app: &Shared, which: Option<usize>, step: i32) {
     }
 }
 
+/// Edit mode, widgets in the panel: a widget was dropped at (x, y). Dropped on another widget,
+/// it takes that one's place (the ones in between move along).
+fn widget_moved(app: &Shared, from: usize, x: f32, y: f32) {
+    let changed = {
+        let mut a = app.borrow_mut();
+        let slots = &a.layout.widgets;
+        let to = slots.iter().position(|(_, r)| r.contains(x, y));
+        match (slots.get(from).map(|(k, _)| *k), to) {
+            (Some(kind), Some(to)) if to != from => {
+                let mut list = a.config.widget_list();
+                if let Some(i) = list.iter().position(|w| *w == kind) {
+                    list.remove(i);
+                    list.insert(to.min(list.len()), kind);
+                    a.config.widgets = list.iter().map(|w| w.key().to_string()).collect();
+                    let _ = a.config.save();
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    };
+    if changed {
+        refresh(app);
+        resize_in_place(app);
+    }
+}
+
 /// A desktop was dragged onto another one: move it to that position.
 fn desk_dropped(app: &Shared, from: i32, x: f32, y: f32) {
     let target = app.borrow().layout.desks.iter().position(|d| d.rect.contains(x, y));
@@ -739,7 +810,9 @@ fn toggle_private(app: &Shared, id: i32) {
 
 // ===================== keyboard =====================
 
-fn on_key(app: &Shared, text: &str, ctrl: bool, shift: bool) -> bool {
+/// Keys that move around the panel. Called before the search box sees a key: true = handled
+/// here; false = the search box gets it (typing, Home/End, Ctrl+arrows, Shift-select...).
+fn on_key(app: &Shared, text: &str, _ctrl: bool, shift: bool) -> bool {
     let k = |key: Key| SharedString::from(key);
     let t = SharedString::from(text);
 
@@ -750,92 +823,59 @@ fn on_key(app: &Shared, text: &str, ctrl: bool, shift: bool) -> bool {
         return true;
     }
 
-    // Ctrl+A selects the whole search text; the next key replaces or deletes all of it
     let searching = !app.borrow().query.is_empty();
-    let first = text.chars().next();
-    if searching && ctrl && matches!(first, Some('a' | 'A' | '\u{1}')) {
-        app.borrow_mut().query_all = true;
-        update_model(app);
-        return true;
-    }
-    let all = std::mem::take(&mut app.borrow_mut().query_all);
-    if searching && (all || ctrl) && (t == k(Key::Backspace) || t == k(Key::Delete)) {
-        // Ctrl+Backspace also clears the whole search
-        app.borrow_mut().query.clear();
-        search_changed(app, true);
-        return true;
-    }
-    if all {
-        if let (Some(c), None) = (first, text.chars().nth(1)) {
-            if !ctrl && !c.is_control() {
-                app.borrow_mut().query = c.to_string();
-                search_changed(app, true);
-                return true;
-            }
-        }
-        update_model(app); // any other key just drops the selection
-    }
-
     if t == k(Key::Escape) {
-        if app.borrow().query.is_empty() {
-            hide(app);
-        } else {
+        if searching {
             app.borrow_mut().query.clear();
-            search_changed(app, true);
+            search_changed(app);
+        } else {
+            hide(app);
         }
     } else if t == k(Key::Return) {
         let sel = app.borrow().selected;
         if let Some(w) = sel.and_then(|s| find(app, s as i32)) {
             open_window(app, w);
         }
-    } else if t == k(Key::Backspace) {
-        let was = !app.borrow().query.is_empty();
-        app.borrow_mut().query.pop();
-        search_changed(app, was);
+    } else if t == k(Key::Tab) || t == k(Key::Backtab) {
+        move_selection(app, if shift || t == k(Key::Backtab) { Dir::Left } else { Dir::Right });
+    } else if t == k(Key::UpArrow) {
+        move_selection(app, Dir::Up);
+    } else if t == k(Key::DownArrow) {
+        move_selection(app, Dir::Down);
+    } else if searching {
+        return false; // ←/→, Delete, typing... edit the search text
+    } else if t == k(Key::LeftArrow) {
+        move_selection(app, Dir::Left);
+    } else if t == k(Key::RightArrow) {
+        move_selection(app, Dir::Right);
     } else if t == k(Key::Delete) {
         if let Some(s) = app.borrow().selected {
             win::close_window(s);
         }
         refresh_soon(app, 300);
-    } else if t == k(Key::Tab) {
-        move_selection(app, if shift { Dir::Left } else { Dir::Right });
-    } else if t == k(Key::LeftArrow) {
-        move_selection(app, Dir::Left);
-    } else if t == k(Key::RightArrow) {
-        move_selection(app, Dir::Right);
-    } else if t == k(Key::UpArrow) {
-        move_selection(app, Dir::Up);
-    } else if t == k(Key::DownArrow) {
-        move_selection(app, Dir::Down);
+    } else if text == " " {
+        // nothing (a space doesn't start a search)
+    } else if let Some(d) = text.chars().next().filter(|c| ('1'..='9').contains(c) && text.len() == 1) {
+        if one_grid(&app.borrow()) {
+            return false; // no desktops to jump to: it starts a search
+        }
+        switch_to(app, d as u32 - '1' as u32);
     } else {
-        let mut chars = text.chars();
-        let (Some(c), None) = (chars.next(), chars.next()) else { return false };
-        if ctrl || c.is_control() {
-            return false;
-        }
-        let searching = !app.borrow().query.is_empty();
-        if !searching && ('1'..='9').contains(&c) {
-            switch_to(app, c as u32 - '1' as u32);
-            return true;
-        }
-        if !searching && c == ' ' {
-            return true;
-        }
-        app.borrow_mut().query.push(c);
-        search_changed(app, searching);
+        return false;
     }
     true
 }
 
+/// Text typed into the search box.
+fn search_edited(app: &Shared, text: &str) {
+    app.borrow_mut().query = text.to_string();
+    search_changed(app);
+}
+
 /// The search text changed. When the search capsule appears or goes, the panel grows or shrinks
 /// (its top edge stays put).
-fn search_changed(app: &Shared, was_searching: bool) {
-    let searching = !app.borrow().query.is_empty();
-    if searching == was_searching {
-        update_model(app);
-        return;
-    }
-    refresh(app);
+fn search_changed(app: &Shared) {
+    rebuild(app);
     resize_in_place(app);
     sync_thumbs_later(app, 200);
 }
@@ -865,7 +905,7 @@ fn move_selection(app: &Shared, dir: Dir) {
         let next = match pos {
             None => {
                 // Start on the current desktop's first app
-                let cur = a.current as usize;
+                let cur = if one_grid(&a) { 0 } else { a.current as usize };
                 list.iter().copied().find(|&h| spot(h).is_some_and(|(d, _)| d == cur)).unwrap_or(list[0])
             }
             Some(p) => {
@@ -910,7 +950,11 @@ pub fn wire(app: &Shared) {
         }};
     }
 
-    ui.on_desk_clicked(with!(|app, i| switch_to(app, i as u32)));
+    ui.on_desk_clicked(with!(|app, i| {
+        if !one_grid(&app.borrow()) {
+            switch_to(app, i as u32);
+        }
+    }));
     ui.on_desk_close(with!(|app, i| close_desktop(app, i as u32)));
     ui.on_app_clicked(with!(|app, id| {
         // A stack opens in its own window over the panel; a single window opens
@@ -949,7 +993,9 @@ pub fn wire(app: &Shared) {
         relayout(app);
     }));
     ui.on_edit_done(with!(|app| edit_done(app)));
+    ui.on_widget_moved(with!(|app, from, x, y| widget_moved(app, from as usize, x, y)));
 
+    ui.on_search_edited(with!(|app, text| search_edited(app, &text)));
     let w1 = w.clone();
     ui.on_key_pressed(move |text, ctrl, shift| match w1.upgrade() {
         Some(app) => on_key(&app, &text, ctrl, shift),

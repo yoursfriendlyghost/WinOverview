@@ -250,7 +250,11 @@ fn close_window(app: &Shared, id: i32) {
         let was = app.borrow().stack_open.as_ref().map(|(d, k, _)| (*d, k.clone()));
         overview::refresh(&app);
         let Some((d, key)) = was else { return };
-        let stack = app.borrow().stacks.get(d as usize).and_then(|s| s.iter().find(|s| s.key == key).cloned());
+        let stack = {
+            let a = app.borrow();
+            let single = overview::one_grid(&a);
+            a.stacks.iter().flatten().find(|s| s.key == key && (single || s.top.desktop == d)).cloned()
+        };
         match stack {
             Some(s) if s.members.len() > 1 => open(&app, &s),
             _ => back_to_panel(&app),

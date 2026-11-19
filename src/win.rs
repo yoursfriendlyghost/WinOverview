@@ -562,6 +562,14 @@ pub fn open_app(app_id: &str) {
     }
 }
 
+/// Open a web page in the default browser.
+pub fn open_url(url: &str) {
+    let wide: Vec<u16> = url.encode_utf16().chain(Some(0)).collect();
+    unsafe {
+        ShellExecuteW(None, w!("open"), PCWSTR(wide.as_ptr()), None, None, SW_SHOWNORMAL);
+    }
+}
+
 /// A sound and a small message that doesn't hold anything up (timer finished).
 pub fn alert(text: &str) {
     unsafe {

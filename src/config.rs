@@ -55,6 +55,11 @@ pub struct Config {
     pub privacy_mode: bool,
     /// App names (the .exe name without ".exe", lower case), e.g. "whatsapp", "msedge"
     pub private_apps: Vec<String>,
+
+    /// One grid of every window instead of one tile per desktop
+    pub one_desktop: bool,
+    /// What searching does to windows that don't match: "dim", "hide" or "top" (matches first)
+    pub search_mode: String,
 }
 
 /// A capsule in the Free layout: one or more widgets side by side (or stacked), moved together.
@@ -103,6 +108,8 @@ impl Default for Config {
             widget_size: "medium".into(),
             privacy_mode: false,
             private_apps: Vec::new(),
+            one_desktop: false,
+            search_mode: "dim".into(),
         }
     }
 }
@@ -173,6 +180,14 @@ impl Config {
     /// Desktops stacked in a column (in both Fixed and Free placement)
     pub fn desktops_vertical(&self) -> bool {
         self.vertical()
+    }
+
+    pub fn search_hides(&self) -> bool {
+        self.search_mode.eq_ignore_ascii_case("hide")
+    }
+
+    pub fn search_sorts(&self) -> bool {
+        self.search_mode.eq_ignore_ascii_case("top")
     }
 
     pub fn free(&self) -> bool {

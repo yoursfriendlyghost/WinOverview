@@ -11,7 +11,7 @@ use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::Arc;
 use std::time::Duration;
 
-use windows::core::{HSTRING, Interface};
+use windows::core::Interface;
 use windows::Graphics::Imaging::{
     BitmapAlphaMode, BitmapBounds, BitmapDecoder, BitmapInterpolationMode, BitmapPixelFormat, BitmapTransform,
     ColorManagementMode, ExifOrientationMode,
@@ -237,90 +237,15 @@ pub fn fetch_weather(
         .ok();
 }
 
-/// Download a small JSON document over HTTPS, using Windows' own HTTP library (WinHTTP).
+/// Download a small JSON document over HTTPS (see net.rs).
 fn http_get(url: &str) -> Result<serde_json::Value, String> {
-    use windows::Win32::Networking::WinHttp::*;
-
-    let rest = url.strip_prefix("https://").ok_or("bad address")?;
-    let (host, path) = rest.split_once('/').map_or((rest, "/".to_string()), |(h, p)| (h, format!("/{p}")));
-    let host_w = HSTRING::from(host);
-    let path_w = HSTRING::from(path.as_str());
-    let fail = |what: &str| {
-        let code = unsafe { windows::Win32::Foundation::GetLastError() }.0;
-        let hint = match code {
-            12007 => " - can't find the server; are you online?",
-            12029 | 12030 => " - couldn't connect; are you online, or is a firewall blocking it?",
-            12002 => " - timed out",
-            _ => "",
-        };
-        format!("No connection ({what} failed, error {code}{hint})")
-    };
-
-    struct Handle(*mut core::ffi::c_void);
-    impl Drop for Handle {
-        fn drop(&mut self) {
-            if !self.0.is_null() {
-                unsafe {
-                    let _ = WinHttpCloseHandle(self.0);
-                }
-            }
-        }
+    let body = crate::net::get(url, 1_000_000)?;
+    let v: serde_json::Value =
+        serde_json::from_slice(&body).map_err(|_| "Unexpected answer from the weather service".to_string())?;
+    if v["error"].as_bool() == Some(true) {
+        return Err(format!("Weather service: {}", v["reason"].as_str().unwrap_or("error")));
     }
-
-    unsafe {
-        let session = Handle(WinHttpOpen(
-            windows::core::w!("WinOverview"),
-            WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
-            windows::core::PCWSTR::null(),
-            windows::core::PCWSTR::null(),
-            0,
-        ));
-        if session.0.is_null() {
-            return Err(fail("WinHttpOpen"));
-        }
-        let _ = WinHttpSetTimeouts(session.0, 8000, 8000, 10000, 10000);
-        let connect = Handle(WinHttpConnect(session.0, &host_w, INTERNET_DEFAULT_HTTPS_PORT as u16, 0));
-        if connect.0.is_null() {
-            return Err(fail("connect"));
-        }
-        let request = Handle(WinHttpOpenRequest(
-            connect.0,
-            windows::core::w!("GET"),
-            &path_w,
-            windows::core::PCWSTR::null(),
-            windows::core::PCWSTR::null(),
-            std::ptr::null(),
-            WINHTTP_FLAG_SECURE,
-        ));
-        if request.0.is_null() {
-            return Err(fail("request"));
-        }
-        WinHttpSendRequest(request.0, None, None, 0, 0, 0).map_err(|_| fail("send"))?;
-        WinHttpReceiveResponse(request.0, std::ptr::null_mut()).map_err(|_| fail("receive"))?;
-
-        let mut body = Vec::new();
-        loop {
-            let mut available = 0u32;
-            WinHttpQueryDataAvailable(request.0, &mut available).map_err(|_| fail("read"))?;
-            if available == 0 {
-                break;
-            }
-            let start = body.len();
-            body.resize(start + available as usize, 0);
-            let mut read = 0u32;
-            WinHttpReadData(request.0, body[start..].as_mut_ptr() as *mut _, available, &mut read).map_err(|_| fail("read"))?;
-            body.truncate(start + read as usize);
-            if body.len() > 1_000_000 {
-                break; // not what we asked for
-            }
-        }
-        let v: serde_json::Value =
-            serde_json::from_slice(&body).map_err(|_| "Unexpected answer from the weather service".to_string())?;
-        if v["error"].as_bool() == Some(true) {
-            return Err(format!("Weather service: {}", v["reason"].as_str().unwrap_or("error")));
-        }
-        Ok(v)
-    }
+    Ok(v)
 }
 
 fn url_encode(s: &str) -> String {
