@@ -1,6 +1,6 @@
 [package]
 name = "winoverview"
-version = "2.2.1"
+version = "2.2.2"
 edition = "2021"
 description = "A minimal virtual desktop overview for Windows 11"
 license = "MIT"

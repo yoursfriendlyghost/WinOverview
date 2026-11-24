@@ -160,14 +160,16 @@ const SINGLE_MAX_COLS: usize = 8;
 
 /// A desktop tile's size and its app cells (relative to the tile).
 /// `n` apps get cells; the tile is sized for `room` (at least `n`).
-fn tile(n: usize, room: usize, mode: Mode, scale: f32, icon_cols: usize, single: bool) -> (f32, f32, Vec<Rect>, usize, Rect) {
+/// `fill_w` (single grid): make the tile at least this wide, using more columns and slightly
+/// bigger previews, so it lines up with the widget row under it.
+fn tile(n: usize, room: usize, mode: Mode, scale: f32, icon_cols: usize, single: bool, fill_w: f32) -> (f32, f32, Vec<Rect>, usize, Rect) {
     let room = room.max(n);
     // The single grid has no number pill at the top
     let head = if single { INSET } else { HEAD };
     match mode {
         Mode::Icons => {
             let cols = icon_cols;
-            let w = INSET * 2.0 + cols as f32 * CELL - 6.0;
+            let w = (INSET * 2.0 + cols as f32 * CELL - 6.0).max(fill_w);
             let h = head + room.div_ceil(cols).max(1) as f32 * CELL + 6.0;
             let cells = (0..n)
                 .map(|i| Rect {
@@ -200,19 +202,33 @@ fn tile(n: usize, room: usize, mode: Mode, scale: f32, icon_cols: usize, single:
                     _ => ((slots as f32).sqrt().ceil() as usize).clamp(3, max_cols),
                 }
             };
-            let rows = slots.div_ceil(cols);
             let shrink = if !single && cols > FULL_SIZE_COLS { FULL_SIZE_COLS as f32 / cols as f32 } else { 1.0 };
+            let (mut sw, mut sh) = (SLOT_W * scale * shrink, (SLOT_H * scale * shrink).max(PREVIEW_HEADER + 34.0));
+            let mut cols = cols;
+            if fill_w > 0.0 {
+                // as many columns as fit the width (no more than there are windows)...
+                let fit = ((fill_w - INSET * 2.0 + SLOT_GAP * 0.75) / (sw + SLOT_GAP * 0.75)).floor() as usize;
+                cols = cols.max(fit.min(slots).min(max_cols));
+                // ...then bigger (same shape, so the live previews grow too), up to 2.2×.
+                // With very few windows that may still not fill it: the row is centred.
+                let g = if cols > 4 { SLOT_GAP * 0.75 } else { SLOT_GAP };
+                let grow = ((fill_w - INSET * 2.0 - (cols - 1) as f32 * g) / cols as f32 / sw).clamp(1.0, 2.2);
+                sw *= grow;
+                sh *= grow;
+            }
+            let rows = slots.div_ceil(cols);
             let g = if cols > 4 { SLOT_GAP * 0.75 } else { SLOT_GAP };
-            let (sw, sh) = (SLOT_W * scale * shrink, (SLOT_H * scale * shrink).max(PREVIEW_HEADER + 34.0));
+            let row_w = cols as f32 * sw + (cols - 1) as f32 * g;
+            let left = INSET + ((fill_w - INSET * 2.0 - row_w) / 2.0).max(0.0);
             let at = |i: usize| Rect {
-                x: INSET + (i % cols) as f32 * (sw + g),
+                x: left + (i % cols) as f32 * (sw + g),
                 y: head + (i / cols) as f32 * (sh + g),
                 w: sw,
                 h: sh,
             };
             let cells = (0..shown).map(at).collect();
             let more_cell = if more > 0 { at(shown) } else { Rect::default() };
-            let w = INSET * 2.0 + cols as f32 * sw + (cols - 1) as f32 * g;
+            let w = (INSET * 2.0 + cols as f32 * sw + (cols - 1) as f32 * g).max(fill_w);
             let h = head + rows as f32 * sh + (rows - 1) as f32 * g + INSET;
             (w, h, cells, more, more_cell)
         }
@@ -230,7 +246,15 @@ fn desk_block(o: &Options, per_row: usize, scale: f32) -> (Vec<Desk>, Rect, f32,
         let size = n.max(room(0));
         let fit = (((o.max_w - PAD * 2.0 - INSET * 2.0 + 6.0) / CELL).floor() as usize).max(6);
         let icon_cols = ((size as f32 * 3.0).sqrt().ceil() as usize).clamp(6, fit);
-        let (w, h, cells, more, more_cell) = tile(n, room(0), o.mode, scale, icon_cols, true);
+        // As wide as the widget row under it, so the panel has no empty strip beside the grid
+        let fill_w = match (o.orient, o.widgets.len()) {
+            (Orient::Horizontal, k) if k > 0 => {
+                let row = k as f32 * o.widget_w + (k - 1) as f32 * GAP;
+                row.min(o.max_w - PAD * 2.0)
+            }
+            _ => 0.0,
+        };
+        let (w, h, cells, more, more_cell) = tile(n, room(0), o.mode, scale, icon_cols, true, fill_w);
         let desk = Desk { rect: Rect { x: 0.0, y: 0.0, w, h }, cells, more, more_cell };
         return (vec![desk], Rect::default(), w, h);
     }
@@ -242,7 +266,7 @@ fn desk_block(o: &Options, per_row: usize, scale: f32) -> (Vec<Desk>, Rect, f32,
         17..=30 => 5,
         _ => 6,
     };
-    let tiles: Vec<_> = apps.iter().enumerate().map(|(i, &n)| tile(n, room(i), o.mode, scale, icon_cols, false)).collect();
+    let tiles: Vec<_> = apps.iter().enumerate().map(|(i, &n)| tile(n, room(i), o.mode, scale, icon_cols, false, 0.0)).collect();
     let mut desks = Vec::with_capacity(apps.len());
     let mut plus = Rect::default();
 

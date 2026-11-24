@@ -248,7 +248,8 @@ export component Overview inherits Window {
                             source: a.icon;
                             image-rendering: smooth;
                         }
-                        if !root.previews && cell.has-hover && !root.dragging && a.count <= 1: CloseDot {
+                        // × closes the window (or every window of a stack)
+                        if !root.previews && cell.has-hover && !root.dragging: CloseDot {
                             x: parent.width - 13px; y: -5px;
                             clicked => { root.app-close(a.id); }
                         }
@@ -259,21 +260,27 @@ export component Overview inherits Window {
                             source: a.icon;
                             image-rendering: smooth;
                         }
-                        if root.previews: Text {
+                        // clipped: right-to-left titles (Arabic, Hebrew) can draw past their box
+                        if root.previews: Rectangle {
                             x: 25px; y: 2px; width: parent.width - 50px; height: 18px;
-                            text: a.title;
-                            color: Palette.t.text; font-size: 11px;
-                            overflow: elide; vertical-alignment: center;
+                            clip: true;
+                            Text {
+                                width: parent.width; height: parent.height;
+                                text: a.title;
+                                color: Palette.t.text; font-size: 11px;
+                                overflow: elide; vertical-alignment: center;
+                            }
                         }
                         if root.previews && !(a.live && root.thumbs-on): Image {
-                            property <length> s: min(40px, parent.height - 34px);
+                            property <length> s: max(min(40px, parent.height - 34px), min(parent.height * 0.3, 96px));
                             x: (parent.width - self.s) / 2; y: 22px + (parent.height - 22px - self.s) / 2;
                             width: self.s; height: self.s;
                             source: a.icon;
                             image-rendering: smooth;
                         }
                         // how many windows are in the stack
-                        if a.count > 1: Rectangle {
+                        // (in previews it makes way for the × while you're over the cell)
+                        if a.count > 1 && !(root.previews && cell.has-hover && !root.dragging): Rectangle {
                             x: root.previews ? parent.width - self.width - 6px : parent.width - self.width + 5px;
                             y: root.previews ? 3px : parent.height - 11px;
                             height: 16px; width: max(16px, badge.preferred-width + 10px);
@@ -298,7 +305,7 @@ export component Overview inherits Window {
                             width: 18px; height: 18px;
                             Glyph { name: "lock"; width: 12px; height: 12px; tint: Palette.t.faint; }
                         }
-                        if root.previews && cell.has-hover && !root.dragging && a.count <= 1: CloseDot {
+                        if root.previews && cell.has-hover && !root.dragging: CloseDot {
                             size: 16px;
                             x: parent.width - 19px; y: 3px;
                             clicked => { root.app-close(a.id); }
@@ -670,14 +677,18 @@ export component StackView inherits Window {
                     source: a.icon;
                     image-rendering: smooth;
                 }
-                Text {
+                Rectangle {
                     x: 25px; y: 2px; width: parent.width - 50px; height: 18px;
-                    text: a.title;
-                    color: Palette.t.text; font-size: 11px;
-                    overflow: elide; vertical-alignment: center;
+                    clip: true;
+                    Text {
+                        width: parent.width; height: parent.height;
+                        text: a.title;
+                        color: Palette.t.text; font-size: 11px;
+                        overflow: elide; vertical-alignment: center;
+                    }
                 }
                 if !(a.live && root.thumbs-on): Image {
-                    property <length> s: min(40px, parent.height - 34px);
+                    property <length> s: max(min(40px, parent.height - 34px), min(parent.height * 0.3, 96px));
                     x: (parent.width - self.s) / 2; y: 22px + (parent.height - 22px - self.s) / 2;
                     width: self.s; height: self.s;
                     source: a.icon;

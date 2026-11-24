@@ -968,8 +968,15 @@ pub fn wire(app: &Shared) {
     }));
     ui.on_app_close(with!(|app, id| {
         stop_hover(app);
-        if let Some(win) = find(app, id) {
-            win::close_window(win.hwnd);
+        // a stack's × closes all of its windows
+        let stack = app.borrow().stacks.iter().flatten().find(|s| s.top.hwnd as i32 == id).map(|s| s.members.clone());
+        match stack {
+            Some(members) => members.into_iter().for_each(win::close_window),
+            None => {
+                if let Some(win) = find(app, id) {
+                    win::close_window(win.hwnd);
+                }
+            }
         }
         refresh_soon(app, 300); // the app may ask "save changes?" first
     }));
